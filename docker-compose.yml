@@ -1,0 +1,93 @@
+services:
+  db:
+    image: mariadb:10.11
+    container_name: ${PROJECT_NAME}_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - backend
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: ${PROJECT_NAME}_pma
+    restart: unless-stopped
+    environment:
+      PMA_HOST: db
+      #PMA_USER: ${MYSQL_USER}
+      #PMA_PASSWORD: ${MYSQL_PASSWORD}
+      UPLOAD_LIMIT: 64M
+    ports:
+      - "8080:80"
+    networks:
+      - backend
+
+  wordpress:
+    #image: wordpress:6-php8.2-fpm-alpine
+    build: .
+    container_name: ${PROJECT_NAME}_app
+    restart: unless-stopped
+    depends_on:
+      - db
+      - redis
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_TABLE_PREFIX: ${DB_PREFIX}
+      WORDPRESS_DB_USER: ${MYSQL_USER}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
+      # Force Staging IP URL
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_HOME', '${STAGING_URL}');
+        define('WP_SITEURL', '${STAGING_URL}');
+        define('FORCE_SSL_ADMIN', false); 
+#        if (strpos($_SERVER['HTTP_X_FORWARDED_PROTO'], 'https') !== false)
+#            $_SERVER['HTTPS']='on';
+    volumes:
+      # Mount the entire HTML dir for persistence in Staging
+      - wp_data:/var/www/html
+      # OVERRIDE with local folders for Live Editing (Method 1)
+      - ./wp-content/themes:/var/www/html/wp-content/themes
+      - ./wp-content/plugins:/var/www/html/wp-content/plugins
+      - ./wp-content/uploads:/var/www/html/wp-content/uploads
+      - ./php/uploads.ini:/usr/local/etc/php/conf.d/uploads.ini
+    networks:
+      - backend
+
+  nginx:
+    image: nginx:alpine
+    container_name: ${PROJECT_NAME}_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - wp_data:/var/www/html
+      - ./nginx/staging.conf:/etc/nginx/conf.d/default.conf
+      - ./wp-content/themes:/var/www/html/wp-content/themes
+      - ./wp-content/plugins:/var/www/html/wp-content/plugins
+      - ./wp-content/uploads:/var/www/html/wp-content/uploads
+    depends_on:
+      - wordpress
+    networks:
+      - backend
+      - frontend
+
+  redis:
+    image: redis:alpine
+    container_name: ${PROJECT_NAME}_redis
+    restart: unless-stopped
+    networks:
+      - backend
+
+volumes:
+  db_data:
+  wp_data:
+
+networks:
+  frontend:
+  backend:

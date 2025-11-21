@@ -1,0 +1,102 @@
+services:
+  db:
+    image: mariadb:10.11
+    container_name: ${PROJECT_NAME}_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - backend
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: ${PROJECT_NAME}_pma
+    environment:
+      PMA_HOST: db
+      #PMA_USER: ${MYSQL_USER}
+      #PMA_PASSWORD: ${MYSQL_PASSWORD}
+      UPLOAD_LIMIT: 64M
+    ports:
+      # Use a different port or restrict to localhost if possible for extra security
+      - "8080:80"
+    networks:
+      - backend
+
+  wordpress:
+    build: . # Builds using Dockerfile (Method 2)
+    container_name: ${PROJECT_NAME}_app
+    restart: always
+    depends_on:
+      - db
+      - redis
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_TABLE_PREFIX: ${DB_PREFIX}
+      WORDPRESS_DB_USER: ${MYSQL_USER}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
+      # Production Domain Settings + Security
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_HOME', 'https://${PROD_DOMAIN}');
+        define('WP_SITEURL', 'https://${PROD_DOMAIN}');
+        define('DISALLOW_FILE_EDIT', true);
+    volumes:
+      # ONLY persist uploads. Code comes from the Image.
+      - wp_uploads:/var/www/html/wp-content/uploads
+    networks:
+      - backend
+
+  nginx:
+    image: nginx:alpine
+    container_name: ${PROJECT_NAME}_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Use Production Config
+      - ./nginx/production.conf:/etc/nginx/conf.d/default.conf
+      - ./certs:/etc/nginx/certs
+      # use certbot if you don't purchase SSL certificate
+    #  - certbot-etc:/etc/letsencrypt
+    # 'volumes_from' lets Nginx see the static assets inside the WordPress container
+    volumes_from:
+      - wordpress
+    depends_on:
+      - wordpress
+    networks:
+      - backend
+      - frontend
+
+  redis:
+    image: redis:alpine
+    container_name: ${PROJECT_NAME}_redis
+    restart: always
+    networks:
+      - backend
+
+  certbot:
+    image: certbot/certbot
+    container_name: ${PROJECT_NAME}_certbot
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - wp_uploads:/var/www/html/wp-content/uploads
+    # This command will try to fetch a cert.
+    # Note: You must have Nginx running first for the verification to work.
+    command: certonly --webroot --webroot-path=/var/www/html --email ${EMAIL} --agree-tos --no-eff-email -d ${PROD_DOMAIN}
+    depends_on:
+      - nginx
+
+volumes:
+  db_data:
+  wp_uploads:
+  certbot-etc:
+
+networks:
+  frontend:
+  backend:
