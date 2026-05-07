@@ -1,0 +1,62 @@
+# =========================
+# WordPress Core (ignore)
+# =========================
+/wp-admin/
+/wp-includes/
+/index.php
+/*.php
+/*.html
+
+# =========================
+# wp-content (selective)
+# =========================
+
+# Ignore everything first
+wp-content/*
+
+## But keep structure (empty folders)
+#!wp-content/plugins/
+#!wp-content/themes/
+#!wp-content/uploads/
+#!wp-content/mu-plugins/
+#!wp-content/languages/
+
+## Keep important file
+#!wp-content/index.php
+
+## =========================
+## Runtime/generated folders
+## =========================
+#wp-content/uploads/*
+#wp-content/upgrade/*
+#wp-content/cache/*
+#wp-content/backups/*
+#wp-content/wflogs/*
+#wp-content/ai1wm-backups/*
+
+# =========================
+# Plugins/themes (optional strategy)
+# =========================
+# Uncomment if you want to track code only
+# !wp-content/plugins/your-plugin/
+# !wp-content/themes/your-theme/
+
+# =========================
+# Docker / environment
+# =========================
+.env
+.env.*
+docker-compose.override.yml
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# CUSTOM IGNORES
+.idea
+backups
+certs/fullchain.crt
+certs/private.key
+nginx/logs/*
+wp-config.php

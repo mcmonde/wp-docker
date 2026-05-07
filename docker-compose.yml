@@ -1,0 +1,121 @@
+services:
+  db:
+    image: mariadb:10.11
+    mem_limit: ${DB_MEM_LIMIT}
+    container_name: ${PROJECT_NAME}_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_INITDB_SKIP_TZINFO: 1  # Skip timezone info to make init faster
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./mysql/my.cnf:/etc/mysql/my.cnf  # Custom MariaDB config file (if necessary)
+    networks:
+      - backend
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: ${PROJECT_NAME}_pma
+    environment:
+      PMA_HOST: db
+      UPLOAD_LIMIT: 64M
+    ports:
+      - "8080:80"  # Only expose if necessary
+    networks:
+      - backend
+    mem_limit: 256m  # Limit memory usage for phpMyAdmin
+
+  wordpress:
+    user: "${PUID}:${PGID}"
+    mem_limit: ${WP_MEM_LIMIT}
+    build: . # Builds using Dockerfile (Method 2)
+    container_name: ${PROJECT_NAME}_app
+    restart: always
+    depends_on:
+      - db
+      - redis
+    environment:
+      PHP_FPM_PM_MAX_CHILDREN: ${PHP_FPM_PM_MAX_CHILDREN}
+      PHP_FPM_PM_START_SERVERS: ${PHP_FPM_PM_START_SERVERS}
+      PHP_FPM_PM_MIN_SPARE_SERVERS: ${PHP_FPM_PM_MIN_SPARE_SERVERS}
+      PHP_FPM_PM_MAX_SPARE_SERVERS: ${PHP_FPM_PM_MAX_SPARE_SERVERS}
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_TABLE_PREFIX: ${DB_PREFIX}
+      WORDPRESS_DB_USER: ${MYSQL_USER}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
+      # Production Domain Settings + Security
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_HOME', '${DOMAIN}');
+        define('WP_SITEURL', '${DOMAIN}');
+        define('DISALLOW_FILE_EDIT', true);
+        define('WP_REDIS_HOST', 'redis'); // or your container name
+        define('WP_REDIS_PORT', 6379);
+        define('WP_REDIS_DATABASE', 0);
+        define('FS_METHOD','direct'); // this will ignore ftp prompt in plugin install and updates
+    volumes:
+      - ./wp-content:/var/www/html/wp-content
+      - ./php/custom.ini:/usr/local/etc/php/conf.d/custom.ini
+    networks:
+      - backend
+    # Optimizing PHP-FPM (consider adjusting these based on load)
+
+  nginx:
+    mem_limit: ${NGINX_MEM_LIMIT:-256m}
+    image: nginx:1.29.6-alpine
+    container_name: ${PROJECT_NAME}_nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/logs:/var/log/nginx
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - ./certs:/etc/nginx/certs
+    volumes_from:
+      - wordpress
+    depends_on:
+      - wordpress
+    networks:
+      - backend
+      - frontend
+    # Nginx optimizations for production
+    environment:
+#      - NGINX_PROXY_CACHE_KEY="$scheme$proxy_host$request_uri"
+#      - NGINX_PROXY_CACHE_PATH="/tmp/nginx_cache levels=1:2 keys_zone=default_cache:10m max_size=1g inactive=60m use_temp_path=off"
+      - NGINX_PROXY_CACHE_VALID="200 1h; 404 1m;"
+      - NGINX_PROXY_CACHE_USE_STALE="error timeout updating"
+
+  redis:
+    image: redis:alpine
+    container_name: ${PROJECT_NAME}_redis
+    restart: always
+    mem_limit: ${REDIS_MEM_LIMIT}
+    command: >
+      redis-server
+      --maxmemory ${REDIS_MEM_LIMIT}
+      --maxmemory-policy allkeys-lru
+    networks:
+      - backend
+
+  # Certbot service for SSL generation (uncomment if you want to use Certbot for SSL)
+#  certbot:
+#    image: certbot/certbot
+#    container_name: ${PROJECT_NAME}_certbot
+#    volumes:
+#      - certbot-etc:/etc/letsencrypt
+#      - wp_uploads:/var/www/html/wp-content/uploads
+#    command: certonly --webroot --webroot-path=/var/www/html --email ${EMAIL} --agree-tos --no-eff-email -d ${PROD_DOMAIN}
+#    depends_on:
+#      - nginx
+
+volumes:
+  db_data:
+#  certbot-etc:
+
+networks:
+  frontend:
+  backend:
