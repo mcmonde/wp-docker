@@ -1,5 +1,5 @@
 # Use the latest stable WordPress image with PHP 8.4 FPM and Alpine
-FROM wordpress:6.9.4-php8.4-fpm-alpine
+FROM wordpress:7.1.0-php8.5-fpm-alpine
 
 # 1. Install OS dependencies (mariadb-client, less, etc.)
 RUN apk add --no-cache less mariadb-client
