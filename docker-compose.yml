@@ -6,13 +6,11 @@ services:
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
       MYSQL_INITDB_SKIP_TZINFO: 1
     volumes:
       - db_data:/var/lib/mysql
       - ./mysql/my.cnf:/etc/mysql/my.cnf
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
     networks:
       - backend
     healthcheck:
@@ -38,40 +36,6 @@ services:
       db:
         condition: service_healthy
 
-  wordpress:
-    user: "${PUID}:${PGID}"
-    mem_limit: ${WP_MEM_LIMIT}
-    build: .
-    container_name: ${PROJECT_NAME}_app
-    restart: always
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      WORDPRESS_DB_HOST: db
-      WORDPRESS_TABLE_PREFIX: ${DB_PREFIX}
-      WORDPRESS_DB_USER: ${MYSQL_USER}
-      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
-      WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
-      WORDPRESS_CONFIG_EXTRA: |
-        define('WP_HOME', '${WP_HOME}');
-        define('WP_SITEURL', '${WP_HOME}');
-        define('DISALLOW_FILE_EDIT', true);
-        define('WP_REDIS_HOST', 'redis');
-        define('WP_REDIS_PORT', 6379);
-        define('WP_REDIS_DATABASE', 0);
-        define('WP_REDIS_PLUGIN_PATH', '/opt/redis-cache');
-        define('WP_REDIS_GRACEFUL', true);
-        define('FS_METHOD', 'direct');
-    volumes:
-      - ./wp-content:/var/www/html/wp-content
-      - ./php/custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
-      - ./php/zz-pool.conf:/usr/local/etc/php-fpm.d/zz-pool.conf:ro
-    networks:
-      - backend
-
   nginx:
     mem_limit: ${NGINX_MEM_LIMIT:-256m}
     image: nginx:1.29.6-alpine
@@ -81,13 +45,9 @@ services:
       - "80:80"
     volumes:
       - ./nginx/logs:/var/log/nginx
-      - ./nginx/conf.d/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./certs:/etc/nginx/certs:ro
       - letsencrypt_www:/var/www/letsencrypt
-    volumes_from:
-      - wordpress
-    depends_on:
-      - wordpress
     networks:
       - backend
       - frontend
@@ -101,10 +61,11 @@ services:
       redis-server
       --maxmemory ${REDIS_MAXMEMORY}
       --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD}
     networks:
       - backend
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10

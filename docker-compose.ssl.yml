@@ -1,13 +1,7 @@
-# Publish HTTPS and switch port 80 to an ACME-aware redirect.
-# Use ./enable-ssl.sh. It issues the certificate before this file is applied,
-# so Nginx does not start with a missing certificate.
+# Publishes 443. generate-env.sh adds this file to COMPOSE_FILE
+# after a certificate exists. Repeat 80 here so a merge never drops it.
 services:
   nginx:
     ports:
+      - "80:80"
       - "443:443"
-    volumes: !override
-      - ./nginx/logs:/var/log/nginx
-      - ./nginx/conf.d/http-redirect.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/conf.d/ssl.conf:/etc/nginx/conf.d/ssl.conf:ro
-      - ./certs:/etc/nginx/certs:ro
-      - letsencrypt_www:/var/www/letsencrypt

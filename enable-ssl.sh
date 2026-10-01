@@ -1,14 +1,16 @@
 #!/bin/bash
-# Issue a Let's Encrypt certificate over HTTP-01, then publish port 443.
-# Requires DOMAIN (bare hostname), WP_HOME (https URL), and a real EMAIL in .env.
-# Port 80 must already be reachable from the public internet.
+# Issue a Let's Encrypt certificate for one or more sites, then publish port 443.
+# Usage: ./enable-ssl.sh [SITE_ID ...]
+# With no ids, every site that has a public https WP_HOME is included.
+# Port 80 must be reachable from the public internet.
 
 set -euo pipefail
 
 cd "$(dirname "$0")"
+shopt -s nullglob
 
 if [ ! -f .env ]; then
-  echo ".env not found. Run ./generate-env.sh, set DOMAIN, WP_HOME, and EMAIL, then retry." >&2
+  echo ".env not found. Run ./generate-env.sh, set EMAIL, and retry." >&2
   exit 1
 fi
 
@@ -19,28 +21,6 @@ set -a
 source .env
 set +a
 
-case "${DOMAIN}" in
-  ""|localhost|127.0.0.1|*://*)
-    echo "Set DOMAIN in .env to a public hostname with no scheme, for example example.com." >&2
-    exit 1
-    ;;
-esac
-
-case "${WP_HOME}" in
-  https://*) ;;
-  *)
-    echo "Set WP_HOME in .env to the https site URL, for example https://${DOMAIN}." >&2
-    exit 1
-    ;;
-esac
-
-home_host=${WP_HOME#https://}
-home_host=${home_host%%/*}
-if [ "$home_host" != "$DOMAIN" ]; then
-  echo "WP_HOME host (${home_host}) and DOMAIN (${DOMAIN}) differ. They must match." >&2
-  exit 1
-fi
-
 case "${EMAIL}" in
   ""|*example.com|*here.com)
     echo "Set EMAIL in .env to an address Let's Encrypt can use." >&2
@@ -48,21 +28,90 @@ case "${EMAIL}" in
     ;;
 esac
 
-echo "Starting the HTTP stack so the ACME challenge can be served..."
-docker compose up -d db redis wordpress nginx
+explicit=no
+if [ "$#" -gt 0 ]; then
+  explicit=yes
+  site_ids=("$@")
+else
+  site_ids=()
+  for site_file in sites/*.env; do
+    site_ids+=("$(basename "$site_file" .env)")
+  done
+fi
 
-echo "Requesting a certificate for ${DOMAIN}..."
-docker compose --profile ssl run --rm certbot certonly \
-  --webroot -w /var/www/letsencrypt \
-  --email "$EMAIL" \
-  --agree-tos \
-  --no-eff-email \
-  --non-interactive \
-  --keep-until-expiring \
-  -d "$DOMAIN"
+if [ "${#site_ids[@]}" -eq 0 ]; then
+  echo "No sites found. Add one with ./add-site.sh." >&2
+  exit 1
+fi
+
+eligible=()
+for site_id in "${site_ids[@]}"; do
+  site_file="sites/${site_id}.env"
+  if [ ! -f "$site_file" ]; then
+    echo "No site file at ${site_file}." >&2
+    exit 1
+  fi
+  domain=$(grep -E '^DOMAIN=' "$site_file" | tail -n 1 | cut -d= -f2-)
+  wp_home=$(grep -E '^WP_HOME=' "$site_file" | tail -n 1 | cut -d= -f2-)
+
+  case "$domain" in
+    ""|localhost|127.0.0.1|*://*)
+      if [ "$explicit" = "yes" ]; then
+        echo "Site '${site_id}' needs DOMAIN set to a public hostname." >&2
+        exit 1
+      fi
+      echo "Skipping ${site_id}: DOMAIN is not a public hostname."
+      continue
+      ;;
+  esac
+
+  case "$wp_home" in
+    https://*) ;;
+    *)
+      if [ "$explicit" = "yes" ]; then
+        echo "Set WP_HOME in ${site_file} to https://${domain} before enabling TLS." >&2
+        exit 1
+      fi
+      echo "Skipping ${site_id}: WP_HOME is not https."
+      continue
+      ;;
+  esac
+
+  home_host=${wp_home#https://}
+  home_host=${home_host%%/*}
+  if [ "$home_host" != "$domain" ]; then
+    echo "Site '${site_id}' WP_HOME host (${home_host}) and DOMAIN (${domain}) differ." >&2
+    exit 1
+  fi
+
+  eligible+=("$site_id")
+done
+
+if [ "${#eligible[@]}" -eq 0 ]; then
+  echo "No sites are ready for HTTPS. Set DOMAIN and an https WP_HOME, then retry." >&2
+  exit 1
+fi
+
+echo "Starting the stack so the ACME challenge can be served..."
+docker compose up -d
+
+for site_id in "${eligible[@]}"; do
+  domain=$(grep -E '^DOMAIN=' "sites/${site_id}.env" | tail -n 1 | cut -d= -f2-)
+  echo "Requesting a certificate for ${domain}..."
+  docker compose --profile ssl run --rm certbot certonly \
+    --webroot -w /var/www/letsencrypt \
+    --email "$EMAIL" \
+    --agree-tos \
+    --no-eff-email \
+    --non-interactive \
+    --keep-until-expiring \
+    -d "$domain"
+done
+
+./generate-env.sh
 
 echo "Publishing HTTPS..."
-docker compose -f docker-compose.yml -f docker-compose.ssl.yml up -d nginx
+docker compose up -d nginx
 
 reloaded=0
 for _ in 1 2 3 4 5; do
@@ -91,4 +140,4 @@ else
   echo "Added a daily 04:15 renewal cron."
 fi
 
-echo "HTTPS is enabled for https://${DOMAIN}."
+echo "HTTPS is enabled for: ${eligible[*]}"

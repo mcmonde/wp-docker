@@ -47,6 +47,37 @@ wp-content/*
 .env
 .env.*
 docker-compose.override.yml
+docker-compose.sites.yml
+mysql/init/*.sql
+
+# Site secrets and per-instance wp-content. The sample file stays tracked.
+sites/*
+!sites/example.env.sample
+
+# Credentials, dumps, and private keys. *.example files stay tracked.
+*.env
+*.sql
+*.sql.gz
+*.sqlite
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*.key
+!*.key.example
+*.crt
+!*.crt.example
+*.pem
+!*.pem.example
+
+# Recreated by generate-env.sh for each instance.
+php/pools/*.conf
+nginx/conf.d/*.conf
+
+# Real certificates placed next to the examples.
+certs/*.key
+certs/*.crt
+certs/*.pem
 
 # =========================
 # Logs

@@ -1,21 +1,22 @@
 #!/bin/bash
-# Replace a site URL in the database, then flush rewrites and Redis.
-# Usage: ./change-url.sh https://old.example https://new.example
+# Replace a site URL in that site's database, then flush its rewrites and cache.
+# Usage: ./change-url.sh SITE_ID https://old.example https://new.example
 
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if [ "$#" -ne 2 ]; then
-  echo "Usage: ./change-url.sh OLD_URL NEW_URL" >&2
+if [ "$#" -ne 3 ]; then
+  echo "Usage: ./change-url.sh SITE_ID OLD_URL NEW_URL" >&2
   exit 1
 fi
 
-OLD_URL=$1
-NEW_URL=$2
+site_id=$1
+OLD_URL=$2
+NEW_URL=$3
 
-if [ ! -f .env ]; then
-  echo ".env not found. Run ./generate-env.sh first." >&2
+if [ ! -f ".env" ] || [ ! -f "sites/${site_id}.env" ]; then
+  echo "Missing .env or sites/${site_id}.env. Run ./generate-env.sh first." >&2
   exit 1
 fi
 
@@ -30,7 +31,7 @@ if [ "${PUID}" -eq 0 ]; then
 fi
 
 wp_exec() {
-  docker compose exec -T -u "${PUID}:${PGID}" wordpress wp "${wp_extra[@]}" "$@"
+  docker compose exec -T -u "${PUID}:${PGID}" "$site_id" wp "${wp_extra[@]}" "$@"
 }
 
 wp_exec search-replace "$OLD_URL" "$NEW_URL" --all-tables --skip-columns=guid
@@ -42,6 +43,6 @@ if wp_exec plugin is-installed elementor >/dev/null 2>&1; then
 fi
 
 wp_exec rewrite flush
-docker compose exec -T redis redis-cli FLUSHALL
+wp_exec cache flush
 
-echo "Replaced ${OLD_URL} with ${NEW_URL}. Rewrites and Redis were flushed."
+echo "Replaced ${OLD_URL} with ${NEW_URL} on ${site_id}."

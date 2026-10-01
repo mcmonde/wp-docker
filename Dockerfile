@@ -1,7 +1,7 @@
 # WordPress PHP-FPM plus WP-CLI and the Redis Object Cache plugin.
 # The plugin is installed outside /var/www/html/wp-content because Compose
 # bind-mounts that directory from the host.
-FROM wordpress:7.1.0-php8.5-fpm-alpine
+FROM wordpress:7.1.2-php8.5-fpm-alpine
 
 ARG REDIS_CACHE_VERSION=3.0.0
 
