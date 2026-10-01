@@ -1,19 +1,22 @@
-# Use the latest stable WordPress image with PHP 8.4 FPM and Alpine
+# WordPress PHP-FPM plus WP-CLI and the Redis Object Cache plugin.
+# The plugin is installed outside /var/www/html/wp-content because Compose
+# bind-mounts that directory from the host.
 FROM wordpress:7.1.0-php8.5-fpm-alpine
 
-# 1. Install OS dependencies (mariadb-client, less, etc.)
-RUN apk add --no-cache less mariadb-client
+ARG REDIS_CACHE_VERSION=3.0.0
 
-# 2. Install WP-CLI (WordPress CLI)
-RUN curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
-    && chmod +x wp-cli.phar \
-    && mv wp-cli.phar /usr/local/bin/wp
+RUN apk add --no-cache less mariadb-client unzip \
+    && curl -fsSL -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+    && chmod +x /usr/local/bin/wp \
+    && curl -fsSL -o /tmp/redis-cache.zip "https://downloads.wordpress.org/plugin/redis-cache.${REDIS_CACHE_VERSION}.zip" \
+    && unzip -q /tmp/redis-cache.zip -d /opt \
+    && rm /tmp/redis-cache.zip \
+    && test -f /opt/redis-cache/includes/object-cache.php \
+    && test -f /opt/redis-cache/dependencies/predis/predis/autoload.php \
+    && chmod -R a+rX /opt/redis-cache
 
-# 3. Copy custom themes and plugins (optional step; uncomment if needed)
-#COPY --chown=www-data:www-data ./wp-content/themes /var/www/html/wp-content/themes
-#COPY --chown=www-data:www-data ./wp-content/plugins /var/www/html/wp-content/plugins
+COPY docker-entrypoint-wrapper.sh /usr/local/bin/wp-stack-entrypoint.sh
+RUN chmod +x /usr/local/bin/wp-stack-entrypoint.sh
 
-# 4. Secure permissions for WordPress content directory
-USER root
-RUN chmod -R 755 /var/www/html/wp-content
-USER www-data
+ENTRYPOINT ["wp-stack-entrypoint.sh"]
+CMD ["php-fpm"]

@@ -56,7 +56,10 @@ docker-compose.override.yml
 # CUSTOM IGNORES
 .idea
 backups
-certs/fullchain.crt
-certs/private.key
+certs/live/
+certs/archive/
+certs/accounts/
+certs/renewal/
+certs/renewal-hooks/
 nginx/logs/*
 wp-config.php
