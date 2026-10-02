@@ -8,11 +8,28 @@ set -euo pipefail
 cd "$(dirname "$0")"
 shopt -s nullglob
 
-FPM_OVERHEAD_MB=64
+FORCE_SITES_CLI=${FORCE_SITES:-}
+
 UPLOAD_DEFAULT=128M
 FASTCGI_DEFAULT=300
 PHP_MEMORY_DEFAULT=256M
-OPCACHE_DEFAULT=256
+OPCACHE_DEFAULT=128
+PHP_WORKER_AVG_DEFAULT=80
+WORKERS_PER_CPU_DEFAULT=4
+PHP_FPM_PM_DEFAULT=ondemand
+
+# Site capacity standard. The first site needs 1 vCPU and a 2 GB server (which reports
+# ~1960MB in `free -m`). Each additional weight-1 site needs another 0.5 vCPU and 512MB.
+BASE_SITE_CPU_MILLI=1000
+BASE_SITE_RAM_MB=1800
+EXTRA_SITE_CPU_MILLI=500
+EXTRA_SITE_RAM_MB=512
+
+MIN_SITE_WORKERS=2
+MAX_SITE_WORKERS=50
+FPM_MASTER_MB=32
+OS_RESERVE_MB=384
+NGINX_RESERVE_MB=128
 
 rand_secret() {
   local length=${1:-32}
@@ -204,29 +221,85 @@ memory_limit_mb() {
   printf '%s' "$mb"
 }
 
-compute_pool() {
-  local wp_mb=$1
-  local site_label=$2
+# Prints how many weight-1 sites this host can run under the capacity standard.
+site_capacity() {
+  local ram_mb=$1
+  local cpu_milli=$2
+  local by_cpu
+  local by_ram
+  if [ "$ram_mb" -lt "$BASE_SITE_RAM_MB" ] || [ "$cpu_milli" -lt "$BASE_SITE_CPU_MILLI" ]; then
+    printf '0'
+    return
+  fi
+  by_cpu=$(((cpu_milli - BASE_SITE_CPU_MILLI) / EXTRA_SITE_CPU_MILLI))
+  by_ram=$(((ram_mb - BASE_SITE_RAM_MB) / EXTRA_SITE_RAM_MB))
+  if [ "$by_cpu" -lt "$by_ram" ]; then
+    printf '%s' $((1 + by_cpu))
+  else
+    printf '%s' $((1 + by_ram))
+  fi
+}
+
+# Sizes MariaDB, Redis, and the WordPress budget for `units` total site weight.
+# Uses TOTAL_RAM_MB, CPU_CORES, and WORKERS_PER_CPU.
+auto_size_services() {
+  local units=$1
+  local worker_cap=$((WORKERS_PER_CPU * CPU_CORES))
+  local min_workers=$((MIN_SITE_WORKERS * units))
+  local buffer_cap=$((TOTAL_RAM_MB / 4))
   local opcache_mb
-  local php_limit_mb
-  local available
-  local min_needed
+  local worker_avg_mb=${PHP_WORKER_AVG_MB:-$PHP_WORKER_AVG_DEFAULT}
+  local max_workers
+  local conn_est
+  local php_need
+  local spare
   opcache_mb=$(memory_limit_mb "${OPCACHE_MEMORY_MB:-$OPCACHE_DEFAULT}")
-  php_limit_mb=$(memory_limit_mb "${PHP_MEMORY_LIMIT:-$PHP_MEMORY_DEFAULT}")
-  available=$((wp_mb - opcache_mb - FPM_OVERHEAD_MB))
-  min_needed=$((php_limit_mb * 2))
 
-  if [ "$available" -lt "$min_needed" ]; then
-    echo "Site '${site_label}' is assigned ${wp_mb}MB." >&2
-    echo "That cannot fit OPcache (${opcache_mb}MB), ${FPM_OVERHEAD_MB}MB overhead, and 2 workers at PHP memory_limit (${php_limit_mb}MB)." >&2
-    echo "Lower its ALLOCATION_WEIGHT, remove a site, lower PHP_MEMORY_LIMIT or OPCACHE_MEMORY_MB, or raise WP_MEM_LIMIT." >&2
-    exit 1
-  fi
+  REDIS_MEM=$((64 + 32 * units))
+  if [ "$REDIS_MEM" -lt 128 ]; then REDIS_MEM=128; fi
+  if [ "$REDIS_MEM" -gt 512 ]; then REDIS_MEM=512; fi
+  REDIS_MAXMEMORY="$((REDIS_MEM * 75 / 100))mb"
 
-  PHP_CHILDREN=$((available / php_limit_mb))
-  if [ "$PHP_CHILDREN" -gt 32 ]; then
-    PHP_CHILDREN=32
+  INNODB_BUFFER_POOL=$((256 + 64 * units))
+  if [ "$INNODB_BUFFER_POOL" -gt "$buffer_cap" ]; then INNODB_BUFFER_POOL=$buffer_cap; fi
+  if [ "$INNODB_BUFFER_POOL" -lt 256 ]; then INNODB_BUFFER_POOL=256; fi
+
+  # Each PHP worker holds one connection; roughly 2MB per connection plus server overhead.
+  max_workers=$worker_cap
+  if [ "$min_workers" -gt "$max_workers" ]; then max_workers=$min_workers; fi
+  conn_est=$((max_workers + 20))
+  if [ "$conn_est" -lt 30 ]; then conn_est=30; fi
+  NGINX_MEM=$NGINX_RESERVE_MB
+
+  # PHP can only use CPU-limited workers, so RAM beyond that is split between
+  # a larger InnoDB buffer pool (up to a quarter of RAM) and WordPress headroom.
+  php_need=$((max_workers * worker_avg_mb + units * (opcache_mb + FPM_MASTER_MB)))
+  spare=$((TOTAL_RAM_MB - OS_RESERVE_MB - NGINX_MEM - REDIS_MEM - INNODB_BUFFER_POOL - 192 - 2 * conn_est - php_need))
+  if [ "$spare" -gt 0 ]; then
+    INNODB_BUFFER_POOL=$((INNODB_BUFFER_POOL + spare / 2))
+    if [ "$INNODB_BUFFER_POOL" -gt "$buffer_cap" ]; then INNODB_BUFFER_POOL=$buffer_cap; fi
   fi
+  INNODB_LOG_FILE=$((INNODB_BUFFER_POOL / 4))
+  if [ "$INNODB_LOG_FILE" -lt 128 ]; then INNODB_LOG_FILE=128; fi
+  if [ "$INNODB_LOG_FILE" -gt 512 ]; then INNODB_LOG_FILE=512; fi
+  DB_MEM=$((INNODB_BUFFER_POOL + 192 + 2 * conn_est))
+
+  WP_MEM=$((TOTAL_RAM_MB - OS_RESERVE_MB - NGINX_MEM - REDIS_MEM - DB_MEM))
+  if [ "$WP_MEM" -lt 1 ]; then WP_MEM=1; fi
+  WP_CPU_MILLICORES=$((CPU_CORES * 800))
+}
+
+# Sets PHP_CHILDREN and the dynamic-mode spare counts for one site.
+# Workers are bounded by RAM (average worker size) and by the site's share of CPU workers.
+size_site_pool() {
+  local share_mb=$1
+  local cpu_workers=$2
+  local ram_workers
+  ram_workers=$(((share_mb - OPCACHE_MB - FPM_MASTER_MB) / PHP_WORKER_AVG_MB))
+  PHP_CHILDREN=$ram_workers
+  if [ "$cpu_workers" -lt "$PHP_CHILDREN" ]; then PHP_CHILDREN=$cpu_workers; fi
+  if [ "$PHP_CHILDREN" -lt "$MIN_SITE_WORKERS" ]; then PHP_CHILDREN=$MIN_SITE_WORKERS; fi
+  if [ "$PHP_CHILDREN" -gt "$MAX_SITE_WORKERS" ]; then PHP_CHILDREN=$MAX_SITE_WORKERS; fi
 
   START_SERVERS=$((PHP_CHILDREN / 4))
   if [ "$START_SERVERS" -lt 1 ]; then START_SERVERS=1; fi
@@ -405,34 +478,9 @@ if [ ! -f .env ]; then
   echo "Detected RAM: ${TOTAL_RAM_MB}MB"
   echo "Detected CPU: ${CPU_CORES} cores"
 
-  SAFE_RAM_MB=$((TOTAL_RAM_MB * 80 / 100))
-  echo "Usable RAM after reservation: ${SAFE_RAM_MB}MB"
-
-  DB_MEM=$((SAFE_RAM_MB * 35 / 100))
-  WP_MEM=$((SAFE_RAM_MB * 45 / 100))
-  REDIS_MEM=$((SAFE_RAM_MB * 10 / 100))
-
-  INNODB_BUFFER_POOL=$((DB_MEM * 70 / 100))
-  INNODB_LOG_FILE=$((DB_MEM * 10 / 100))
-  if [ "$INNODB_LOG_FILE" -lt 128 ]; then INNODB_LOG_FILE=128; fi
-  if [ "$INNODB_LOG_FILE" -gt 512 ]; then INNODB_LOG_FILE=512; fi
-
-  MAX_CONNECTIONS=$((CPU_CORES * 20))
-  if [ "$MAX_CONNECTIONS" -lt 50 ]; then MAX_CONNECTIONS=50; fi
-  if [ "$MAX_CONNECTIONS" -gt 200 ]; then MAX_CONNECTIONS=200; fi
-
-  if [ "$INNODB_BUFFER_POOL" -lt 256 ]; then
-    echo "Unsafe DB config detected: INNODB_BUFFER_POOL=${INNODB_BUFFER_POOL}MB" >&2
-    exit 1
-  fi
-  if [ "$DB_MEM" -lt 512 ]; then
-    echo "DB memory too low (${DB_MEM}MB)." >&2
-    exit 1
-  fi
-  if [ "$REDIS_MEM" -lt 128 ]; then
-    echo "Redis memory too low (${REDIS_MEM}MB)." >&2
-    exit 1
-  fi
+  WORKERS_PER_CPU=$WORKERS_PER_CPU_DEFAULT
+  auto_size_services 1
+  MAX_CONNECTIONS=50
 
   PUID=$(id -u)
   PGID=$(id -g)
@@ -449,10 +497,8 @@ if [ ! -f .env ]; then
     fi
   fi
 
-  REDIS_MAXMEMORY="$((REDIS_MEM * 75 / 100))mb"
   MYSQL_ROOT_PASSWORD=$(rand_secret)
   REDIS_PASSWORD=$(rand_secret)
-  WP_CPU_MILLICORES=$((CPU_CORES * 800))
   ask_allocation
 
   umask 077
@@ -467,14 +513,17 @@ EMAIL=changeme@example.com
 MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
 REDIS_PASSWORD=${REDIS_PASSWORD}
 
-# Docker memory limits for MariaDB, Redis, and Nginx.
-# WP_MEM_LIMIT and WP_CPU_MILLICORES are the WordPress budget.
-# ALLOCATE_RESOURCES=yes splits that budget across sites.
-# ALLOCATE_RESOURCES=no omits CPU and RAM limits on WordPress containers.
+# AUTO_TUNE=yes re-detects host RAM and CPU on every ./generate-env.sh run and rewrites the
+# MariaDB, Redis, Nginx, and WordPress budget values below for the current site count.
+# Set AUTO_TUNE=no to keep hand-edited values.
+AUTO_TUNE=yes
+
+# ALLOCATE_RESOURCES=yes sets Docker RAM/CPU caps on each WordPress container by weight.
+# ALLOCATE_RESOURCES=no omits those caps. Worker sizing is the same either way.
 DB_MEM_LIMIT=${DB_MEM}m
 WP_MEM_LIMIT=${WP_MEM}m
 REDIS_MEM_LIMIT=${REDIS_MEM}m
-NGINX_MEM_LIMIT=256m
+NGINX_MEM_LIMIT=${NGINX_MEM}m
 REDIS_MAXMEMORY=${REDIS_MAXMEMORY}
 ALLOCATE_RESOURCES=${ALLOCATE_RESOURCES}
 WP_CPU_MILLICORES=${WP_CPU_MILLICORES}
@@ -483,13 +532,19 @@ INNODB_BUFFER_POOL_SIZE=${INNODB_BUFFER_POOL}M
 INNODB_LOG_FILE_SIZE=${INNODB_LOG_FILE}M
 MAX_CONNECTIONS=${MAX_CONNECTIONS}
 
+# PHP_MEMORY_LIMIT is a per-request ceiling. Workers are counted from PHP_WORKER_AVG_MB,
+# the typical memory one worker uses (80 for most sites, 120+ for WooCommerce/page builders).
 PHP_MEMORY_LIMIT=${PHP_MEMORY_DEFAULT}
+PHP_WORKER_AVG_MB=${PHP_WORKER_AVG_DEFAULT}
+WORKERS_PER_CPU=${WORKERS_PER_CPU_DEFAULT}
+# ondemand starts workers on request and stops idle ones; dynamic keeps spare workers running.
+PHP_FPM_PM=${PHP_FPM_PM_DEFAULT}
 UPLOAD_MAX=${UPLOAD_DEFAULT}
 FASTCGI_TIMEOUT=${FASTCGI_DEFAULT}
 OPCACHE_MEMORY_MB=${OPCACHE_DEFAULT}
 
+# Host snapshot, refreshed on every run.
 TOTAL_RAM_MB=${TOTAL_RAM_MB}
-SAFE_RAM_MB=${SAFE_RAM_MB}
 CPU_CORES=${CPU_CORES}
 EOF
   umask 022
@@ -510,6 +565,10 @@ ensure_var FASTCGI_TIMEOUT "$FASTCGI_DEFAULT"
 ensure_var PHP_MEMORY_LIMIT "$PHP_MEMORY_DEFAULT"
 ensure_var OPCACHE_MEMORY_MB "$OPCACHE_DEFAULT"
 ensure_var NGINX_MEM_LIMIT "256m"
+ensure_var AUTO_TUNE yes
+ensure_var PHP_WORKER_AVG_MB "$PHP_WORKER_AVG_DEFAULT"
+ensure_var WORKERS_PER_CPU "$WORKERS_PER_CPU_DEFAULT"
+ensure_var PHP_FPM_PM "$PHP_FPM_PM_DEFAULT"
 
 if [ -z "${ALLOCATE_RESOURCES:-}" ]; then
   ask_allocation
@@ -545,6 +604,11 @@ if secret_needs_generation "${REDIS_PASSWORD:-}"; then
   chmod 600 .env
 fi
 
+TOTAL_RAM_MB=$(free -m | awk '/Mem:/ {print $2}')
+CPU_CORES=$(nproc)
+set_env_var TOTAL_RAM_MB "$TOTAL_RAM_MB"
+set_env_var CPU_CORES "$CPU_CORES"
+
 db_mb=${DB_MEM_LIMIT%[mM]}
 redis_mb=${REDIS_MEM_LIMIT%[mM]}
 redis_max_mb=${REDIS_MAXMEMORY//[^0-9]/}
@@ -560,22 +624,64 @@ case "$ALLOCATE_RESOURCES" in
 esac
 set_env_var ALLOCATE_RESOURCES "$ALLOCATE_RESOURCES"
 
-if [[ ! "${WP_CPU_MILLICORES}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "WP_CPU_MILLICORES must be a positive integer. 1000 equals 1 CPU." >&2
+AUTO_TUNE=$(printf '%s' "$AUTO_TUNE" | tr '[:upper:]' '[:lower:]')
+case "$AUTO_TUNE" in
+  yes|no) ;;
+  *)
+    echo "AUTO_TUNE must be yes or no." >&2
+    exit 1
+    ;;
+esac
+
+PHP_FPM_PM=$(printf '%s' "$PHP_FPM_PM" | tr '[:upper:]' '[:lower:]')
+case "$PHP_FPM_PM" in
+  ondemand|dynamic) ;;
+  *)
+    echo "PHP_FPM_PM must be ondemand or dynamic." >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! "$PHP_WORKER_AVG_MB" =~ ^[0-9]+$ ]] || [ "$PHP_WORKER_AVG_MB" -lt 16 ]; then
+  echo "PHP_WORKER_AVG_MB must be a whole number of MB, 16 or more." >&2
+  exit 1
+fi
+if [[ ! "$WORKERS_PER_CPU" =~ ^[0-9]+$ ]] || [ "$WORKERS_PER_CPU" -lt 1 ] || [ "$WORKERS_PER_CPU" -gt 16 ]; then
+  echo "WORKERS_PER_CPU must be between 1 and 16." >&2
   exit 1
 fi
 
-if [ "$db_mb" -lt 512 ]; then
-  echo "DB_MEM_LIMIT=${DB_MEM_LIMIT} is below the 512 MB minimum." >&2
-  exit 1
-fi
-if [ "$redis_mb" -lt 128 ]; then
-  echo "REDIS_MEM_LIMIT=${REDIS_MEM_LIMIT} is below the 128 MB minimum." >&2
-  exit 1
-fi
-if [ "$redis_max_mb" -ge "$redis_mb" ]; then
-  echo "REDIS_MAXMEMORY=${REDIS_MAXMEMORY} must stay below REDIS_MEM_LIMIT=${REDIS_MEM_LIMIT}." >&2
-  exit 1
+# FORCE_SITES=yes on the command line or in .env allows more sites than the capacity standard.
+FORCE_SITES=${FORCE_SITES_CLI:-${FORCE_SITES:-no}}
+FORCE_SITES=$(printf '%s' "$FORCE_SITES" | tr '[:upper:]' '[:lower:]')
+case "$FORCE_SITES" in
+  yes|no) ;;
+  *)
+    echo "FORCE_SITES must be yes or no." >&2
+    exit 1
+    ;;
+esac
+
+OPCACHE_MB=$(memory_limit_mb "$OPCACHE_MEMORY_MB")
+PHP_LIMIT_MB=$(memory_limit_mb "$PHP_MEMORY_LIMIT")
+
+if [ "$AUTO_TUNE" = "no" ]; then
+  if [[ ! "${WP_CPU_MILLICORES}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "WP_CPU_MILLICORES must be a positive integer. 1000 equals 1 CPU." >&2
+    exit 1
+  fi
+  if [ "$db_mb" -lt 512 ]; then
+    echo "DB_MEM_LIMIT=${DB_MEM_LIMIT} is below the 512 MB minimum." >&2
+    exit 1
+  fi
+  if [ "$redis_mb" -lt 128 ]; then
+    echo "REDIS_MEM_LIMIT=${REDIS_MEM_LIMIT} is below the 128 MB minimum." >&2
+    exit 1
+  fi
+  if [ "$redis_max_mb" -ge "$redis_mb" ]; then
+    echo "REDIS_MAXMEMORY=${REDIS_MAXMEMORY} must stay below REDIS_MEM_LIMIT=${REDIS_MEM_LIMIT}." >&2
+    exit 1
+  fi
 fi
 
 ensure_default_site
@@ -682,6 +788,42 @@ for weight in "${SITE_WEIGHTS[@]}"; do
   total_weight=$((total_weight + weight))
 done
 
+capacity_problem() {
+  if [ "$FORCE_SITES" = "yes" ]; then
+    echo "Warning: $1 Continuing because FORCE_SITES=yes." >&2
+  else
+    echo "$1" >&2
+    echo "Remove a site, lower an ALLOCATION_WEIGHT, or resize the server. For a benchmark, rerun with FORCE_SITES=yes." >&2
+    exit 1
+  fi
+}
+
+SITE_CAPACITY=$(site_capacity "$TOTAL_RAM_MB" $((CPU_CORES * 1000)))
+if [ "$SITE_CAPACITY" -lt 1 ]; then
+  capacity_problem "This host (${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM) is below the 1 vCPU / 2 GB minimum for one site."
+elif [ "$total_weight" -gt "$SITE_CAPACITY" ]; then
+  capacity_problem "This host (${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM) supports a total site weight of ${SITE_CAPACITY}, but the sites add up to ${total_weight}. The first site needs 1 vCPU and 2 GB; each extra weight-1 site needs 0.5 vCPU and 512MB."
+fi
+
+if [ "$AUTO_TUNE" = "yes" ]; then
+  auto_size_services "$total_weight"
+  set_env_var DB_MEM_LIMIT "${DB_MEM}m"
+  set_env_var WP_MEM_LIMIT "${WP_MEM}m"
+  set_env_var REDIS_MEM_LIMIT "${REDIS_MEM}m"
+  set_env_var NGINX_MEM_LIMIT "${NGINX_MEM}m"
+  set_env_var REDIS_MAXMEMORY "$REDIS_MAXMEMORY"
+  set_env_var WP_CPU_MILLICORES "$WP_CPU_MILLICORES"
+  INNODB_BUFFER_POOL_SIZE="${INNODB_BUFFER_POOL}M"
+  INNODB_LOG_FILE_SIZE="${INNODB_LOG_FILE}M"
+  set_env_var INNODB_BUFFER_POOL_SIZE "$INNODB_BUFFER_POOL_SIZE"
+  set_env_var INNODB_LOG_FILE_SIZE "$INNODB_LOG_FILE_SIZE"
+  DB_MEM_LIMIT="${DB_MEM}m"
+  REDIS_MEM_LIMIT="${REDIS_MEM}m"
+  NGINX_MEM_LIMIT="${NGINX_MEM}m"
+  WP_MEM_LIMIT="${WP_MEM}m"
+  total_wp_mb=$WP_MEM
+fi
+
 boost=0
 max_weight=0
 for index in "${!SITE_WEIGHTS[@]}"; do
@@ -691,65 +833,75 @@ for index in "${!SITE_WEIGHTS[@]}"; do
   fi
 done
 
-if [ "$ALLOCATE_RESOURCES" = "yes" ]; then
-  assigned_mb=0
-  assigned_cpu=0
-  for index in "${!SITE_IDS[@]}"; do
-    site_mb=$((total_wp_mb * SITE_WEIGHTS[index] / total_weight))
-    site_cpu=$((WP_CPU_MILLICORES * SITE_WEIGHTS[index] / total_weight))
-    SITE_MEM_MB+=("$site_mb")
-    SITE_CPU_MILLI+=("$site_cpu")
-    assigned_mb=$((assigned_mb + site_mb))
-    assigned_cpu=$((assigned_cpu + site_cpu))
-  done
+# Each site gets a weighted share of the WordPress RAM budget and of the host's CPU workers,
+# whether or not Docker caps are applied.
+worker_cap=$((WORKERS_PER_CPU * CPU_CORES))
+site_floor_mb=$((OPCACHE_MB + FPM_MASTER_MB + MIN_SITE_WORKERS * PHP_WORKER_AVG_MB))
+assigned_mb=0
+assigned_cpu=0
+for index in "${!SITE_IDS[@]}"; do
+  site_mb=$((total_wp_mb * SITE_WEIGHTS[index] / total_weight))
+  site_cpu=$((WP_CPU_MILLICORES * SITE_WEIGHTS[index] / total_weight))
+  SITE_MEM_MB+=("$site_mb")
+  SITE_CPU_MILLI+=("$site_cpu")
+  assigned_mb=$((assigned_mb + site_mb))
+  assigned_cpu=$((assigned_cpu + site_cpu))
+done
+SITE_MEM_MB[$boost]=$((SITE_MEM_MB[boost] + total_wp_mb - assigned_mb))
+SITE_CPU_MILLI[$boost]=$((SITE_CPU_MILLI[boost] + WP_CPU_MILLICORES - assigned_cpu))
 
-  SITE_MEM_MB[$boost]=$((SITE_MEM_MB[boost] + total_wp_mb - assigned_mb))
-  SITE_CPU_MILLI[$boost]=$((SITE_CPU_MILLI[boost] + WP_CPU_MILLICORES - assigned_cpu))
+total_children=0
+for index in "${!SITE_IDS[@]}"; do
+  id=${SITE_IDS[$index]}
+  share_mb=${SITE_MEM_MB[$index]}
+  if [ "$share_mb" -lt "$site_floor_mb" ]; then
+    capacity_problem "Site '${id}' gets ${share_mb}MB, below the ${site_floor_mb}MB needed for OPcache (${OPCACHE_MB}MB), the FPM master (${FPM_MASTER_MB}MB), and ${MIN_SITE_WORKERS} workers at PHP_WORKER_AVG_MB (${PHP_WORKER_AVG_MB}MB)."
+  fi
+  if [ "$ALLOCATE_RESOURCES" = "yes" ] && [ "${SITE_CPU_MILLI[$index]}" -lt 100 ]; then
+    capacity_problem "Site '${id}' gets ${SITE_CPU_MILLI[$index]} millicores, below the 100 minimum for a Docker CPU cap."
+  fi
 
-  for index in "${!SITE_IDS[@]}"; do
-    if [ "${SITE_MEM_MB[$index]}" -lt 1 ] || [ "${SITE_CPU_MILLI[$index]}" -lt 100 ]; then
-      echo "Site '${SITE_IDS[$index]}' received ${SITE_MEM_MB[$index]}MB and ${SITE_CPU_MILLI[$index]} millicores." >&2
-      echo "Lower another site's ALLOCATION_WEIGHT or raise WP_MEM_LIMIT and WP_CPU_MILLICORES." >&2
-      exit 1
+  size_site_pool "$share_mb" $((worker_cap * SITE_WEIGHTS[index] / total_weight))
+  total_children=$((total_children + PHP_CHILDREN))
+
+  if [ "$ALLOCATE_RESOURCES" = "yes" ]; then
+    if [ "$share_mb" -lt $((OPCACHE_MB + FPM_MASTER_MB + PHP_LIMIT_MB)) ]; then
+      echo "Warning: site '${id}' has a ${share_mb}MB RAM cap; one request reaching PHP_MEMORY_LIMIT (${PHP_LIMIT_MB}MB) could be stopped by it." >&2
     fi
-    compute_pool "${SITE_MEM_MB[$index]}" "${SITE_IDS[$index]}"
-    SITE_MEMS+=("${SITE_MEM_MB[$index]}m")
-    SITE_CPUS+=("$(format_cpus "${SITE_CPU_MILLI[$index]}")")
-    SITE_CHILDREN+=("$PHP_CHILDREN")
-    SITE_STARTS+=("$START_SERVERS")
-    SITE_MINS+=("$MIN_SPARE")
-    SITE_MAXS+=("$MAX_SPARE")
-    upsert_file_var "${site_files[$index]}" SITE_MEM_LIMIT "${SITE_MEM_MB[$index]}m"
-    upsert_file_var "${site_files[$index]}" SITE_CPU_LIMIT "$(format_cpus "${SITE_CPU_MILLI[$index]}")"
-    upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MAX_CHILDREN "$PHP_CHILDREN"
-    upsert_file_var "${site_files[$index]}" PHP_FPM_PM_START_SERVERS "$START_SERVERS"
-    upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MIN_SPARE_SERVERS "$MIN_SPARE"
-    upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MAX_SPARE_SERVERS "$MAX_SPARE"
-  done
-else
-  if [ "$SITE_COUNT" -gt 0 ]; then
-    pool_mb=$((total_wp_mb / SITE_COUNT))
+    site_mem_limit="${share_mb}m"
+    site_cpu_limit=$(format_cpus "${SITE_CPU_MILLI[$index]}")
   else
-    pool_mb=$total_wp_mb
+    site_mem_limit=unlimited
+    site_cpu_limit=unlimited
   fi
-  if [ "$pool_mb" -lt 1 ]; then
-    pool_mb=1
-  fi
-  for index in "${!SITE_IDS[@]}"; do
-    compute_pool "$pool_mb" "${SITE_IDS[$index]}"
-    SITE_MEMS+=("unlimited")
-    SITE_CPUS+=("unlimited")
-    SITE_CHILDREN+=("$PHP_CHILDREN")
-    SITE_STARTS+=("$START_SERVERS")
-    SITE_MINS+=("$MIN_SPARE")
-    SITE_MAXS+=("$MAX_SPARE")
-    upsert_file_var "${site_files[$index]}" SITE_MEM_LIMIT unlimited
-    upsert_file_var "${site_files[$index]}" SITE_CPU_LIMIT unlimited
-    upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MAX_CHILDREN "$PHP_CHILDREN"
-    upsert_file_var "${site_files[$index]}" PHP_FPM_PM_START_SERVERS "$START_SERVERS"
-    upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MIN_SPARE_SERVERS "$MIN_SPARE"
-    upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MAX_SPARE_SERVERS "$MAX_SPARE"
-  done
+
+  SITE_MEMS+=("$site_mem_limit")
+  SITE_CPUS+=("$site_cpu_limit")
+  SITE_CHILDREN+=("$PHP_CHILDREN")
+  SITE_STARTS+=("$START_SERVERS")
+  SITE_MINS+=("$MIN_SPARE")
+  SITE_MAXS+=("$MAX_SPARE")
+  upsert_file_var "${site_files[$index]}" SITE_MEM_LIMIT "$site_mem_limit"
+  upsert_file_var "${site_files[$index]}" SITE_CPU_LIMIT "$site_cpu_limit"
+  upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MAX_CHILDREN "$PHP_CHILDREN"
+  upsert_file_var "${site_files[$index]}" PHP_FPM_PM_START_SERVERS "$START_SERVERS"
+  upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MIN_SPARE_SERVERS "$MIN_SPARE"
+  upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MAX_SPARE_SERVERS "$MAX_SPARE"
+done
+
+# Every worker holds one database connection.
+needed_connections=$((total_children + 20))
+if [ "$needed_connections" -lt 30 ]; then needed_connections=30; fi
+if [ "$AUTO_TUNE" = "yes" ]; then
+  MAX_CONNECTIONS=$needed_connections
+  set_env_var MAX_CONNECTIONS "$MAX_CONNECTIONS"
+elif [ "$MAX_CONNECTIONS" -lt $((total_children + 10)) ]; then
+  echo "Warning: MAX_CONNECTIONS=${MAX_CONNECTIONS} is close to or below the ${total_children} PHP workers. Raise it to at least ${needed_connections}." >&2
+fi
+
+planned_mb=$((OS_RESERVE_MB + ${DB_MEM_LIMIT//[^0-9]/} + ${REDIS_MEM_LIMIT//[^0-9]/} + ${NGINX_MEM_LIMIT//[^0-9]/} + total_wp_mb))
+if [ "$planned_mb" -gt "$TOTAL_RAM_MB" ]; then
+  echo "Warning: planned memory is ${planned_mb}MB (OS ${OS_RESERVE_MB}MB + MariaDB ${DB_MEM_LIMIT} + Redis ${REDIS_MEM_LIMIT} + Nginx ${NGINX_MEM_LIMIT} + WordPress ${total_wp_mb}MB), more than the host's ${TOTAL_RAM_MB}MB. Lower WP_MEM_LIMIT or DB_MEM_LIMIT, or set AUTO_TUNE=yes." >&2
 fi
 
 umask 022
@@ -901,7 +1053,17 @@ umask 022
 
 for index in "${!SITE_IDS[@]}"; do
   id=${SITE_IDS[$index]}
-  cat > "php/pools/${id}.conf" <<EOF
+  if [ "$PHP_FPM_PM" = "ondemand" ]; then
+    cat > "php/pools/${id}.conf" <<EOF
+; Generated by generate-env.sh for ${id}.
+[www]
+pm = ondemand
+pm.max_children = ${SITE_CHILDREN[$index]}
+pm.process_idle_timeout = 10s
+pm.max_requests = 500
+EOF
+  else
+    cat > "php/pools/${id}.conf" <<EOF
 ; Generated by generate-env.sh for ${id}.
 [www]
 pm = dynamic
@@ -911,6 +1073,7 @@ pm.min_spare_servers = ${SITE_MINS[$index]}
 pm.max_spare_servers = ${SITE_MAXS[$index]}
 pm.max_requests = 500
 EOF
+  fi
 
   listen_plain="listen 80;"
   if [ "$SITE_COUNT" -eq 1 ]; then
@@ -1082,13 +1245,19 @@ if [ "$any_ssl" = "yes" ]; then
 fi
 set_env_var COMPOSE_FILE "$compose_file"
 
+echo "Host: ${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM. Capacity: total site weight ${SITE_CAPACITY}; in use: ${total_weight}."
+echo "Services: MariaDB ${DB_MEM_LIMIT} (buffer pool ${INNODB_BUFFER_POOL_SIZE}, ${MAX_CONNECTIONS} connections), Redis ${REDIS_MEM_LIMIT}, WordPress budget ${total_wp_mb}MB. AUTO_TUNE=${AUTO_TUNE}."
+echo "PHP: memory_limit ${PHP_MEMORY_LIMIT}, OPcache ${OPCACHE_MB}MB, ${PHP_WORKER_AVG_MB}MB average worker, pm=${PHP_FPM_PM}."
 if [ "$ALLOCATE_RESOURCES" = "yes" ]; then
-  echo "Configured ${SITE_COUNT} site(s) with CPU and RAM allocation:"
+  echo "Configured ${SITE_COUNT} site(s) with Docker CPU and RAM caps:"
   for index in "${!SITE_IDS[@]}"; do
-    echo "  ${SITE_IDS[$index]}: ${SITE_MEMS[$index]} RAM, ${SITE_CPUS[$index]} CPUs (weight ${SITE_WEIGHTS[$index]})"
+    echo "  ${SITE_IDS[$index]}: ${SITE_CHILDREN[$index]} workers, ${SITE_MEMS[$index]} RAM, ${SITE_CPUS[$index]} CPUs (weight ${SITE_WEIGHTS[$index]})"
   done
 else
-  echo "Configured ${SITE_COUNT} site(s) with no CPU or RAM limits on WordPress."
+  echo "Configured ${SITE_COUNT} site(s) with no Docker CPU or RAM caps:"
+  for index in "${!SITE_IDS[@]}"; do
+    echo "  ${SITE_IDS[$index]}: ${SITE_CHILDREN[$index]} workers, ${SITE_MEM_MB[$index]}MB sizing share (weight ${SITE_WEIGHTS[$index]})"
+  done
 fi
 
 ./provision-sites.sh

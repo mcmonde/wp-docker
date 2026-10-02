@@ -76,38 +76,44 @@ Site database passwords live in `sites/<id>.env`, not in `.env`.
 
 | Variable | Description | Default behaviour |
 |---|---|---|
-| `ALLOCATE_RESOURCES` | `yes` = Docker `mem_limit`/`cpus` on each PHP container; `no` = no cap on PHP containers | Asked on first run |
-| `WP_MEM_LIMIT` | Total WordPress RAM budget (MB) | ~45% of 80% of host RAM |
-| `WP_CPU_MILLICORES` | Total WordPress CPU budget (`1000` = 1 core) | ~80% of host cores × 1000 |
-| `DB_MEM_LIMIT` | MariaDB container RAM cap | ~35% of safe RAM |
-| `REDIS_MEM_LIMIT` | Redis container RAM cap | ~10% of safe RAM |
-| `NGINX_MEM_LIMIT` | Nginx container RAM cap | `256m` |
-| `REDIS_MAXMEMORY` | Redis `maxmemory` setting | 75% of `REDIS_MEM_LIMIT` |
+| `ALLOCATE_RESOURCES` | `yes` = Docker `mem_limit`/`cpus` on each PHP container, split by weight; `no` = no caps. Worker sizing is the same either way. | Asked on first run |
+| `AUTO_TUNE` | `yes` = every `./generate-env.sh` run re-sizes the values marked "auto" below for the current host and total site weight. `no` = keep hand-edited values. | `yes` |
+| `FORCE_SITES` | `yes` = allow more total site weight than the server's capacity (for benchmarks). Can also be passed on the command line. | not set (`no`) |
+| `WP_MEM_LIMIT` | Total WordPress RAM budget (MB). Auto. | RAM left after the services below and a 384 MB OS reserve |
+| `WP_CPU_MILLICORES` | Total WordPress CPU cap budget (`1000` = 1 core). Auto. | 80% of host cores × 1000 |
+| `DB_MEM_LIMIT` | MariaDB container RAM cap. Auto. | Buffer pool + 192 MB + 2 MB per connection |
+| `REDIS_MEM_LIMIT` | Redis container RAM cap. Auto. | 64 + 32 MB per site weight, 128–512 MB |
+| `REDIS_MAXMEMORY` | Redis `maxmemory` setting. Auto. | 75% of `REDIS_MEM_LIMIT` |
+| `NGINX_MEM_LIMIT` | Nginx container RAM cap. Auto. | `128m` |
+
+See [Site capacity and Memory model in README.md](../README.md#site-capacity) for the formulas and examples.
 
 ### MariaDB tuning (written to `mysql/my.cnf`)
 
 | Variable | Description |
 |---|---|
-| `INNODB_BUFFER_POOL_SIZE` | InnoDB buffer pool (~70% of `DB_MEM_LIMIT`) |
-| `INNODB_LOG_FILE_SIZE` | InnoDB log size |
-| `MAX_CONNECTIONS` | Max MariaDB connections |
+| `INNODB_BUFFER_POOL_SIZE` | InnoDB buffer pool. Auto: 256 + 64 MB per site weight, plus half of any RAM PHP cannot use, up to a quarter of RAM. |
+| `INNODB_LOG_FILE_SIZE` | InnoDB log size. Auto: a quarter of the buffer pool, 128–512 MB. |
+| `MAX_CONNECTIONS` | Max MariaDB connections. Auto: total PHP workers + 20, at least 30. |
 
-### PHP / Nginx tuning (written to `php/custom.ini` and nginx)
+### PHP / Nginx tuning (written to `php/custom.ini`, PHP pools, and nginx)
 
 | Variable | Description | Default |
 |---|---|---|
-| `PHP_MEMORY_LIMIT` | PHP `memory_limit` per request | `256M` |
+| `PHP_MEMORY_LIMIT` | PHP `memory_limit`: a per-request ceiling. Does not change worker counts. | `256M` |
+| `PHP_WORKER_AVG_MB` | Typical memory one PHP worker uses; workers are counted from this. Use 120+ for WooCommerce or page builders. | `80` |
+| `WORKERS_PER_CPU` | Host-wide PHP workers per vCPU, shared by weight | `4` |
+| `PHP_FPM_PM` | `ondemand` starts workers on request and stops idle ones after 10 s; `dynamic` keeps spare workers running | `ondemand` |
+| `OPCACHE_MEMORY_MB` | OPcache size per PHP container, shared by its workers | `128` |
 | `UPLOAD_MAX` | Upload size (`upload_max_filesize`, `post_max_size`, nginx `client_max_body_size`) | `128M` |
 | `FASTCGI_TIMEOUT` | PHP `max_execution_time`, nginx FastCGI timeouts | `300` |
-| `OPCACHE_MEMORY_MB` | OPcache size in `php/custom.ini` | `256` |
 
-### Informational (read-only hints)
+### Informational (refreshed every run)
 
 | Variable | Description |
 |---|---|
-| `TOTAL_RAM_MB` | Host RAM detected at setup |
-| `SAFE_RAM_MB` | 80% of host RAM |
-| `CPU_CORES` | Host CPU count detected at setup |
+| `TOTAL_RAM_MB` | Host RAM reported by `free -m` |
+| `CPU_CORES` | Host vCPU count reported by `nproc` |
 
 ### Changing stack variables
 
@@ -141,7 +147,7 @@ Each instance has its own file, e.g. `sites/default.env`, `sites/blog.env`. See 
 | `DB_USER` | MariaDB user (scoped to `DB_NAME` only) | `blog` |
 | `DB_PASSWORD` | MariaDB password | Auto-generated |
 | `DB_PREFIX` | WordPress table prefix (must end with `_`) | `wp_` |
-| `ALLOCATION_WEIGHT` | Share of WordPress RAM/CPU when `ALLOCATE_RESOURCES=yes` | `1` |
+| `ALLOCATION_WEIGHT` | Share of WordPress RAM, PHP workers, and CPU; also counts as that many sites against capacity | `1` |
 
 ### Auto-generated secrets (do not commit)
 
@@ -156,14 +162,14 @@ Generated on first `./generate-env.sh` if missing or placeholder. Rotating them 
 
 | Variable | Description |
 |---|---|
-| `SITE_MEM_LIMIT` | This instance's Docker RAM cap |
-| `SITE_CPU_LIMIT` | This instance's Docker CPU cap |
-| `PHP_FPM_PM_MAX_CHILDREN` | FPM worker count |
-| `PHP_FPM_PM_START_SERVERS` | FPM start servers |
-| `PHP_FPM_PM_MIN_SPARE_SERVERS` | FPM min spare |
-| `PHP_FPM_PM_MAX_SPARE_SERVERS` | FPM max spare |
+| `SITE_MEM_LIMIT` | This instance's Docker RAM cap (`unlimited` when `ALLOCATE_RESOURCES=no`) |
+| `SITE_CPU_LIMIT` | This instance's Docker CPU cap (`unlimited` when `ALLOCATE_RESOURCES=no`) |
+| `PHP_FPM_PM_MAX_CHILDREN` | FPM worker count: the smaller of the RAM-based and CPU-based counts, 2–50 |
+| `PHP_FPM_PM_START_SERVERS` | FPM start servers (used only with `PHP_FPM_PM=dynamic`) |
+| `PHP_FPM_PM_MIN_SPARE_SERVERS` | FPM min spare (`dynamic` only) |
+| `PHP_FPM_PM_MAX_SPARE_SERVERS` | FPM max spare (`dynamic` only) |
 
-You normally leave the FPM keys alone; they are recalculated when site count or weights change.
+These are output, not input: they are recalculated on every run, so edits are overwritten. Change `PHP_WORKER_AVG_MB`, `WORKERS_PER_CPU`, `OPCACHE_MEMORY_MB`, or `ALLOCATION_WEIGHT` instead.
 
 ### Spaces (optional, disabled by default)
 
@@ -280,8 +286,14 @@ PHP containers are recreated with the new environment. No image rebuild is requi
 ### What `./add-site.sh` does
 
 1. Creates `sites/<id>.env` with a random `DB_PASSWORD` and `SPACES_ENABLED=no` (Spaces off by default).
-2. Runs `./generate-env.sh` (nginx vhost, PHP pool, compose service, SQL grants, missing `SPACES_*` backfill).
+2. Runs `./generate-env.sh` (capacity check, nginx vhost, PHP pool, compose service, SQL grants, missing `SPACES_*` backfill).
 3. You run `./up.sh` to start the new PHP container; `./provision-sites.sh` creates the database and user.
+
+If the new site would put the total `ALLOCATION_WEIGHT` over the server's capacity (see [Site capacity](../README.md#site-capacity)), `./generate-env.sh` stops and `./add-site.sh` deletes the new `sites/<id>.env`, so nothing changes. To override for a benchmark:
+
+```bash
+FORCE_SITES=yes ./add-site.sh blog blog.localhost
+```
 
 ### Manual creation
 
@@ -364,7 +376,7 @@ No Docker image rebuild or MariaDB volume wipe is required.
 
 ### Allocation weight (`ALLOCATION_WEIGHT`)
 
-Higher weight = larger share of `WP_MEM_LIMIT` and `WP_CPU_MILLICORES`. Edit in `sites/<id>.env`, then `./generate-env.sh && ./up.sh`.
+Higher weight = larger share of `WP_MEM_LIMIT`, PHP workers, and `WP_CPU_MILLICORES`, in both allocation modes. A weight of 2 also uses 2 of the server's site capacity. Edit in `sites/<id>.env`, then `./generate-env.sh && ./up.sh`.
 
 ### Rotating WordPress auth keys
 
