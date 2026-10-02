@@ -2,7 +2,7 @@
 
 This document explains how to run and configure the multi-instance WordPress Docker stack: environment files, WordPress configuration, adding sites, and day-to-day operations.
 
-For a short overview, see [README.md](../README.md). For production deployment, security headers, and **log locations**, see [PRODUCTION.md](PRODUCTION.md).
+For a short overview, see [README.md](../README.md). For production deployment, see [PRODUCTION.md](PRODUCTION.md). To store uploads in DigitalOcean Spaces, see [SPACES.md](SPACES.md).
 
 ---
 

@@ -16,4 +16,15 @@ if [ -f "$src" ]; then
   fi
 fi
 
+spaces_loader=/opt/do-spaces-uploads/loader.php
+spaces_dst=/var/www/html/wp-content/mu-plugins/do-spaces-uploads.php
+if [ -f "$spaces_loader" ]; then
+  mkdir -p /var/www/html/wp-content/mu-plugins 2>/dev/null || true
+  if [ ! -e "$spaces_dst" ] || [ "$spaces_loader" -nt "$spaces_dst" ]; then
+    if ! cp "$spaces_loader" "$spaces_dst"; then
+      echo "wp-stack: could not install ${spaces_dst}. DO Spaces uploads stay off until that file is writable." >&2
+    fi
+  fi
+fi
+
 exec docker-entrypoint.sh "$@"

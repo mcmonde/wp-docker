@@ -197,6 +197,57 @@ compute_pool() {
   if [ "$START_SERVERS" -gt "$MAX_SPARE" ]; then START_SERVERS=$MAX_SPARE; fi
 }
 
+spaces_config_extra() {
+  local site_file=$1
+  local id=$2
+  local enabled key secret bucket region endpoint public_url prefix path_style
+
+  enabled=$(site_get "$site_file" SPACES_ENABLED)
+  enabled=$(printf '%s' "$enabled" | tr '[:upper:]' '[:lower:]')
+  if [ "$enabled" != "yes" ]; then
+    echo "        define('DO_SPACES_ENABLED', false);"
+    return
+  fi
+
+  key=$(site_get "$site_file" SPACES_KEY)
+  secret=$(site_get "$site_file" SPACES_SECRET)
+  bucket=$(site_get "$site_file" SPACES_BUCKET)
+  region=$(site_get "$site_file" SPACES_REGION)
+  endpoint=$(site_get "$site_file" SPACES_ENDPOINT)
+  public_url=$(site_get "$site_file" SPACES_PUBLIC_URL)
+  prefix=$(site_get "$site_file" SPACES_PREFIX)
+  path_style=$(site_get "$site_file" SPACES_PATH_STYLE)
+  path_style=$(printf '%s' "$path_style" | tr '[:upper:]' '[:lower:]')
+
+  if [ -z "$prefix" ]; then
+    prefix=$id
+    upsert_file_var "$site_file" SPACES_PREFIX "$prefix"
+  fi
+
+  if [ -z "$key" ] || [ -z "$secret" ] || [ -z "$bucket" ] || [ -z "$region" ]; then
+    echo "Site '${id}' has SPACES_ENABLED=yes but needs SPACES_KEY, SPACES_SECRET, SPACES_BUCKET, and SPACES_REGION." >&2
+    exit 1
+  fi
+
+  cat <<EOF
+        define('DO_SPACES_ENABLED', true);
+        define('DO_SPACES_KEY', '$(php_sq "$key")');
+        define('DO_SPACES_SECRET', '$(php_sq "$secret")');
+        define('DO_SPACES_BUCKET', '$(php_sq "$bucket")');
+        define('DO_SPACES_REGION', '$(php_sq "$region")');
+        define('DO_SPACES_PREFIX', '$(php_sq "$prefix")');
+EOF
+  if [ -n "$endpoint" ]; then
+    echo "        define('DO_SPACES_ENDPOINT', '$(php_sq "$endpoint")');"
+  fi
+  if [ -n "$public_url" ]; then
+    echo "        define('DO_SPACES_PUBLIC_URL', '$(php_sq "$public_url")');"
+  fi
+  if [ "$path_style" = "yes" ]; then
+    echo "        define('DO_SPACES_PATH_STYLE', true);"
+  fi
+}
+
 write_security_headers() {
   cat <<'EOF'
     add_header X-Frame-Options "SAMEORIGIN" always;
@@ -766,6 +817,7 @@ ${secret_yaml}      WORDPRESS_CONFIG_EXTRA: |
         define('WP_REDIS_PLUGIN_PATH', '/opt/redis-cache');
         define('WP_REDIS_GRACEFUL', true);
         define('FS_METHOD', 'direct');
+$(spaces_config_extra "${site_files[$index]}" "$id")
     volumes:
       - ./php/custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
       - ./php/pools/${id}.conf:/usr/local/etc/php-fpm.d/zz-pool.conf:ro

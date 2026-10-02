@@ -2,7 +2,7 @@
 
 One Docker Compose stack that runs several WordPress instances on a single machine. Use it locally or on a server.
 
-**Documentation:** [docs/USAGE.md](docs/USAGE.md) (configuration and operations) · [docs/PRODUCTION.md](docs/PRODUCTION.md) (production checklist, security headers, logging)
+**Documentation:** [docs/USAGE.md](docs/USAGE.md) (configuration and operations) · [docs/PRODUCTION.md](docs/PRODUCTION.md) (production checklist) · [docs/SPACES.md](docs/SPACES.md) (DigitalOcean Spaces media uploads)
 
 Nginx, Redis, and MariaDB are shared. There is one MariaDB server. Every instance has its own:
 

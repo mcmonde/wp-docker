@@ -15,6 +15,9 @@ RUN apk add --no-cache less mariadb-client unzip \
     && test -f /opt/redis-cache/dependencies/predis/predis/autoload.php \
     && chmod -R a+rX /opt/redis-cache
 
+COPY plugins/do-spaces-uploads /opt/do-spaces-uploads
+RUN chmod -R a+rX /opt/do-spaces-uploads
+
 COPY docker-entrypoint-wrapper.sh /usr/local/bin/wp-stack-entrypoint.sh
 RUN chmod +x /usr/local/bin/wp-stack-entrypoint.sh
 
