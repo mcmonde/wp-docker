@@ -165,6 +165,34 @@ Generated on first `./generate-env.sh` if missing or placeholder. Rotating them 
 
 You normally leave the FPM keys alone; they are recalculated when site count or weights change.
 
+### Spaces (optional, disabled by default)
+
+Every `sites/<id>.env` includes DigitalOcean Spaces keys with **`SPACES_ENABLED=no`**. You do not add them manually.
+
+| When | What happens |
+|---|---|
+| First `./generate-env.sh` | `sites/default.env` is created and gets the Spaces block |
+| `./add-site.sh` | The new site file gets the same block (via `./generate-env.sh`) |
+| Later `./generate-env.sh` runs | Missing `SPACES_*` keys are added. Empty keys are filled only while Spaces is disabled; enabled sites are never rewritten. |
+
+Defaults:
+
+```bash
+SPACES_ENABLED=no
+SPACES_KEY=your-key-do-space-here
+SPACES_SECRET=your-secret-do-space-here
+SPACES_BUCKET=bucket-name-here
+SPACES_REGION=sgp1
+SPACES_ENDPOINT=https://SPACES_BUCKET.SPACES_REGION.digitaloceanspaces.com
+SPACES_PUBLIC_URL=https://SPACES_BUCKET.SPACES_REGION.cdn.digitaloceanspaces.com
+SPACES_PREFIX=<id>
+SPACES_PATH_STYLE=no
+```
+
+`SPACES_BUCKET` and `SPACES_REGION` inside the URLs are replaced with your bucket and region values. `SPACES_PREFIX` is the folder inside the bucket and defaults to the site id. Leave `SPACES_PATH_STYLE=no` for DigitalOcean.
+
+To enable Spaces: set `SPACES_ENABLED=yes`, replace the key, secret, and bucket placeholders, then run `./generate-env.sh`, `docker compose build`, and `./up.sh`. `./generate-env.sh` refuses to continue if placeholders remain on an enabled site. Full guide: [SPACES.md](SPACES.md).
+
 ---
 
 ## WordPress configuration (`wp-config.php`)
@@ -201,7 +229,10 @@ define('WP_REDIS_DATABASE', <index>);
 define('WP_REDIS_PLUGIN_PATH', '/opt/redis-cache');
 define('WP_REDIS_GRACEFUL', true);
 define('FS_METHOD', 'direct');
+define('DO_SPACES_ENABLED', false);   // true when SPACES_ENABLED=yes in sites/<id>.env
 ```
+
+When `SPACES_ENABLED=yes` in `sites/<id>.env`, `generate-env.sh` also injects `DO_SPACES_KEY`, `DO_SPACES_SECRET`, `DO_SPACES_BUCKET`, and related defines. See [SPACES.md](SPACES.md).
 
 To add custom defines (e.g. `WP_DEBUG`), extend the `WORDPRESS_CONFIG_EXTRA` block in `generate-env.sh`, then run `./generate-env.sh` and `./up.sh`. Per-site extras are not supported out of the box.
 
@@ -248,8 +279,8 @@ PHP containers are recreated with the new environment. No image rebuild is requi
 
 ### What `./add-site.sh` does
 
-1. Creates `sites/<id>.env` with a random `DB_PASSWORD`.
-2. Runs `./generate-env.sh` (nginx vhost, PHP pool, compose service, SQL grants).
+1. Creates `sites/<id>.env` with a random `DB_PASSWORD` and `SPACES_ENABLED=no` (Spaces off by default).
+2. Runs `./generate-env.sh` (nginx vhost, PHP pool, compose service, SQL grants, missing `SPACES_*` backfill).
 3. You run `./up.sh` to start the new PHP container; `./provision-sites.sh` creates the database and user.
 
 ### Manual creation
@@ -424,7 +455,7 @@ If TLS is terminated elsewhere (e.g. Cloudflare), leave instances on HTTP and sk
 
 | Script | Purpose |
 |---|---|
-| `./generate-env.sh` | Regenerate compose, nginx, PHP pools, MariaDB init SQL, secrets |
+| `./generate-env.sh` | Regenerate compose, nginx, PHP pools, MariaDB init SQL, secrets; backfill missing `SPACES_*` in site env files |
 | `./up.sh` | Start stack (`docker compose up -d`) + `./provision-sites.sh` |
 | `./down.sh` | Stop stack |
 | `./add-site.sh` | Add `sites/<id>.env` and regenerate |
@@ -554,5 +585,6 @@ docker compose exec -T -u "${PUID}:${PGID}" <id> wp core is-installed
 | `DB_PASSWORD` | `./generate-env.sh` → `./up.sh` → `./provision-sites.sh` |
 | `DB_PREFIX` (live site) | backup → rename tables → edit env → `./generate-env.sh` → `./up.sh` |
 | New instance | `./add-site.sh` → `./up.sh` |
+| Enable DigitalOcean Spaces | edit `SPACES_*` in `sites/<id>.env` → `./generate-env.sh` → `docker compose build` → `./up.sh` ([SPACES.md](SPACES.md)) |
 | HTTPS | set `WP_HOME` to https → `./enable-ssl.sh` |
 | WordPress core update | `./backup.sh` → `./upgrade-wordpress.sh` |

@@ -26,7 +26,7 @@ That database user can read and write only its own database.
 ./generate-env.sh
 ```
 
-That writes `.env` once and creates `sites/default.env` for the first instance. It generates the MariaDB root password, that instance's database password, and the WordPress authentication keys. It asks whether WordPress containers should share a CPU and RAM budget. Later runs keep those secrets.
+That writes `.env` once and creates `sites/default.env` for the first instance. It generates the MariaDB root password, that instance's database password, and the WordPress authentication keys. Each site file also gets `SPACES_ENABLED=no` and empty Spaces credential placeholders (off by default; see [docs/SPACES.md](docs/SPACES.md)). It asks whether WordPress containers should share a CPU and RAM budget. Later runs keep those secrets and backfill any missing `SPACES_*` keys on existing site files.
 
 `.env`, `sites/<id>.env`, `docker-compose.sites.yml`, and `mysql/init/*.sql` contain the secrets and are gitignored. `./add-site.sh` generates the database password for each new instance.
 

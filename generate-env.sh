@@ -92,6 +92,50 @@ ensure_site_secret() {
   fi
 }
 
+# Empty values are only filled while Spaces is disabled, so a live config is never rewritten.
+ensure_spaces_var() {
+  local file=$1
+  local key=$2
+  local default_value=$3
+  local enabled
+  if ! grep -q "^${key}=" "$file"; then
+    upsert_file_var "$file" "$key" "$default_value"
+    return
+  fi
+  enabled=$(site_get "$file" SPACES_ENABLED | tr '[:upper:]' '[:lower:]')
+  if [ "$enabled" != "yes" ] && [ -z "$(site_get "$file" "$key")" ]; then
+    upsert_file_var "$file" "$key" "$default_value"
+  fi
+}
+
+SPACES_KEY_PLACEHOLDER=your-key-do-space-here
+SPACES_SECRET_PLACEHOLDER=your-secret-do-space-here
+SPACES_BUCKET_PLACEHOLDER=bucket-name-here
+
+ensure_spaces_vars() {
+  local site_file=$1
+  local site_id=$2
+  ensure_spaces_var "$site_file" SPACES_ENABLED "no"
+  ensure_spaces_var "$site_file" SPACES_KEY "$SPACES_KEY_PLACEHOLDER"
+  ensure_spaces_var "$site_file" SPACES_SECRET "$SPACES_SECRET_PLACEHOLDER"
+  ensure_spaces_var "$site_file" SPACES_BUCKET "$SPACES_BUCKET_PLACEHOLDER"
+  ensure_spaces_var "$site_file" SPACES_REGION "sgp1"
+  ensure_spaces_var "$site_file" SPACES_ENDPOINT "https://SPACES_BUCKET.SPACES_REGION.digitaloceanspaces.com"
+  ensure_spaces_var "$site_file" SPACES_PUBLIC_URL "https://SPACES_BUCKET.SPACES_REGION.cdn.digitaloceanspaces.com"
+  ensure_spaces_var "$site_file" SPACES_PREFIX "$site_id"
+  ensure_spaces_var "$site_file" SPACES_PATH_STYLE "no"
+}
+
+# SPACES_BUCKET and SPACES_REGION are literal uppercase tokens; bucket names are lowercase, so they cannot collide.
+expand_spaces_tokens() {
+  local value=$1
+  local bucket=$2
+  local region=$3
+  value=${value//SPACES_BUCKET/$bucket}
+  value=${value//SPACES_REGION/$region}
+  printf '%s' "$value"
+}
+
 sql_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e "s/'/''/g"
 }
@@ -224,10 +268,15 @@ spaces_config_extra() {
     upsert_file_var "$site_file" SPACES_PREFIX "$prefix"
   fi
 
-  if [ -z "$key" ] || [ -z "$secret" ] || [ -z "$bucket" ] || [ -z "$region" ]; then
-    echo "Site '${id}' has SPACES_ENABLED=yes but needs SPACES_KEY, SPACES_SECRET, SPACES_BUCKET, and SPACES_REGION." >&2
+  if [ -z "$key" ] || [ -z "$secret" ] || [ -z "$bucket" ] || [ -z "$region" ] \
+    || [ "$key" = "$SPACES_KEY_PLACEHOLDER" ] || [ "$secret" = "$SPACES_SECRET_PLACEHOLDER" ] \
+    || [ "$bucket" = "$SPACES_BUCKET_PLACEHOLDER" ]; then
+    echo "Site '${id}' has SPACES_ENABLED=yes but SPACES_KEY, SPACES_SECRET, SPACES_BUCKET, and SPACES_REGION must be set to real values in sites/${id}.env." >&2
     exit 1
   fi
+
+  endpoint=$(expand_spaces_tokens "$endpoint" "$bucket" "$region")
+  public_url=$(expand_spaces_tokens "$public_url" "$bucket" "$region")
 
   cat <<EOF
         define('DO_SPACES_ENABLED', true);
@@ -558,6 +607,7 @@ for site_file in "${site_files[@]}"; do
   for key in "${WP_SECRET_KEYS[@]}"; do
     ensure_site_secret "$site_file" "$key" 64
   done
+  ensure_spaces_vars "$site_file" "$site_id"
   db_pass=$(site_get "$site_file" DB_PASSWORD)
   db_prefix=$(site_get "$site_file" DB_PREFIX)
   if [ -z "$db_prefix" ]; then
