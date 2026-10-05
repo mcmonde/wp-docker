@@ -39,13 +39,15 @@ WordPress core files live in a Docker volume per instance (`<id>_html`). Themes,
 ## First-time setup
 
 ```bash
-./generate-env.sh    # creates .env and sites/default.env
+./generate-env.sh    # creates .env and sites/default.env, checks capacity, sizes services
 # Edit .env: EMAIL, PUID, PGID if needed
 # Edit sites/default.env: DOMAIN, WP_HOME
 ./up.sh              # builds image, starts stack, creates databases
 ```
 
 Open the site in a browser and complete the WordPress install wizard.
+
+The server needs at least 1 vCPU and 2 GB RAM for one instance; on a 2 GB server, add 2 GB of swap first. See [Site capacity in README.md](../README.md#site-capacity) for how many instances a server can hold.
 
 ---
 
@@ -467,17 +469,19 @@ If TLS is terminated elsewhere (e.g. Cloudflare), leave instances on HTTP and sk
 
 | Script | Purpose |
 |---|---|
-| `./generate-env.sh` | Regenerate compose, nginx, PHP pools, MariaDB init SQL, secrets; backfill missing `SPACES_*` in site env files |
+| `./generate-env.sh` | Detect host CPU/RAM, check site capacity, size MariaDB/Redis/PHP (`AUTO_TUNE`), and regenerate compose, nginx, PHP pools, MariaDB init SQL, and secrets; backfill missing `SPACES_*` in site env files. `FORCE_SITES=yes` skips the capacity refusal. |
 | `./up.sh` | Start stack (`docker compose up -d`) + `./provision-sites.sh` |
 | `./down.sh` | Stop stack |
-| `./add-site.sh` | Add `sites/<id>.env` and regenerate |
+| `./add-site.sh` | Add `sites/<id>.env` and regenerate; removes the new file if the server is over capacity |
 | `./provision-sites.sh` | Create databases and users from `mysql/init/sites.sql` |
 | `./backup.sh` | Dump every instance DB to `backups/` |
 | `./restore.sh` | Interactive restore from `backups/*.sql.gz` |
+| `./cron-setup.sh` | Add the daily 03:00 `./backup.sh` cron if missing (called by `./generate-env.sh`) |
 | `./change-url.sh` | Search-replace URL in one instance's database |
 | `./enable-ssl.sh` | Issue certificates and enable HTTPS |
 | `./renew-ssl.sh` | Renew certificates and reload nginx (cron) |
 | `./upgrade-wordpress.sh` | Rebuild image; `wp core update`, `update-db`, and `cache flush` per instance |
+| `./migrate-spaces.sh` | Move existing uploads to DigitalOcean Spaces (`--dry-run`, `--limit=N`, `--keep-local`); see [SPACES.md](SPACES.md) |
 
 ### phpMyAdmin (optional)
 
@@ -545,6 +549,18 @@ Docker volumes (not on host bind paths):
 
 ## Troubleshooting
 
+### "supports a total site weight of N" or "below the 1 vCPU / 2 GB minimum"
+
+The instances' total `ALLOCATION_WEIGHT` is more than the server can hold (first instance 1 vCPU and 2 GB, each extra weight-1 instance 0.5 vCPU and 512 MB). Remove an instance, lower a weight, or resize the server and rerun `./generate-env.sh`. For a benchmark only, rerun with `FORCE_SITES=yes`.
+
+### "Allowed memory size exhausted" or slow pages under load
+
+- **Memory errors:** a request hit `PHP_MEMORY_LIMIT`. Raise it in `.env` (for example `512M`); it does not change worker counts.
+- **Requests queue under load:** check `PHP_FPM_PM_MAX_CHILDREN` in `sites/<id>.env`. Workers are capped by CPU (`WORKERS_PER_CPU`) and by RAM (`PHP_WORKER_AVG_MB`). If real worker memory is lower than `PHP_WORKER_AVG_MB`, lower it; estimate it under load with `docker stats --no-stream` (container memory divided by busy workers). Raise the instance's `ALLOCATION_WEIGHT` to give it a larger share.
+- **Heavy plugins (WooCommerce, page builders):** set `PHP_WORKER_AVG_MB=120` or more so the RAM limit is realistic.
+
+Run `./generate-env.sh && ./up.sh` after any of these changes.
+
 ### Config change had no effect
 
 Run both `./generate-env.sh` and `./up.sh`. PHP env vars apply only after the container is recreated.
@@ -597,6 +613,9 @@ docker compose exec -T -u "${PUID}:${PGID}" <id> wp core is-installed
 | `DB_PASSWORD` | `./generate-env.sh` → `./up.sh` → `./provision-sites.sh` |
 | `DB_PREFIX` (live site) | backup → rename tables → edit env → `./generate-env.sh` → `./up.sh` |
 | New instance | `./add-site.sh` → `./up.sh` |
+| `ALLOCATE_RESOURCES`, `ALLOCATION_WEIGHT`, or PHP worker settings | `./generate-env.sh` → `./up.sh` |
+| Server resized (CPU or RAM) | `./generate-env.sh` → `./up.sh` (re-detects the host and re-tunes) |
 | Enable DigitalOcean Spaces | edit `SPACES_*` in `sites/<id>.env` → `./generate-env.sh` → `docker compose build` → `./up.sh` ([SPACES.md](SPACES.md)) |
+| Move existing uploads to Spaces | `./migrate-spaces.sh <id> --dry-run` → `./migrate-spaces.sh <id>` |
 | HTTPS | set `WP_HOME` to https → `./enable-ssl.sh` |
 | WordPress core update | `./backup.sh` → `./upgrade-wordpress.sh` |

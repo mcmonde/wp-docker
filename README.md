@@ -26,7 +26,9 @@ That database user can read and write only its own database.
 ./generate-env.sh
 ```
 
-That writes `.env` once and creates `sites/default.env` for the first instance. It generates the MariaDB root password, that instance's database password, and the WordPress authentication keys. Each site file also gets `SPACES_ENABLED=no` and empty Spaces credential placeholders (off by default; see [docs/SPACES.md](docs/SPACES.md)). It asks whether WordPress containers should share a CPU and RAM budget. Later runs keep those secrets and backfill any missing `SPACES_*` keys on existing site files.
+That writes `.env` once and creates `sites/default.env` for the first instance. It generates the MariaDB root password, that instance's database password, and the WordPress authentication keys. Each site file also gets a DigitalOcean Spaces block with `SPACES_ENABLED=no` and placeholder credentials (see [Media in DigitalOcean Spaces](#media-in-digitalocean-spaces)). It asks whether WordPress containers should get Docker CPU and RAM caps, then checks that the server has capacity for the instances and sizes MariaDB, Redis, and PHP (see [What is tuned](#what-is-tuned)). Later runs keep the secrets, backfill any missing `SPACES_*` keys, and re-tune for the current server and instance count.
+
+On a 2 GB server, add 2 GB of swap before starting the stack.
 
 `.env`, `sites/<id>.env`, `docker-compose.sites.yml`, and `mysql/init/*.sql` contain the secrets and are gitignored. `./add-site.sh` generates the database password for each new instance.
 
@@ -111,6 +113,27 @@ If Cloudflare or another proxy already terminates TLS, leave the instances on HT
 ```
 
 This updates that instance's database, Elementor when it is installed, rewrite rules, and that instance's object cache.
+
+## Media in DigitalOcean Spaces
+
+Uploads can be stored in a DigitalOcean Spaces bucket instead of `sites/<id>/wp-content/uploads/`. The image ships a free must-use plugin, **DO Spaces Uploads** (`plugins/do-spaces-uploads/`), that uploads media and thumbnails to Spaces and rewrites attachment URLs; no commercial license is needed.
+
+It is off by default. To enable it for one instance, set `SPACES_ENABLED=yes` and replace the key, secret, and bucket placeholders in `sites/<id>.env`, then:
+
+```bash
+./generate-env.sh
+docker compose build
+./up.sh
+```
+
+Move existing uploads with:
+
+```bash
+./migrate-spaces.sh blog --dry-run
+./migrate-spaces.sh blog
+```
+
+See [docs/SPACES.md](docs/SPACES.md) for every variable, bucket permissions, migration options, and troubleshooting.
 
 ## WordPress upgrades
 
@@ -212,7 +235,27 @@ Redis requires a password (`REDIS_PASSWORD` in `.env`). Object caching uses the 
 - `docker-compose.yml` is MariaDB, Redis, Nginx, phpMyAdmin (`tools`), and Certbot (`ssl`).
 - `docker-compose.sites.yml` is generated and holds one PHP service per instance.
 - `docker-compose.ssl.yml` publishes port 443 once a certificate exists.
-- `./up.sh` and `./down.sh` start and stop the stack.
+- `Dockerfile` builds the WordPress PHP-FPM image with WP-CLI, the Redis Object Cache plugin, and DO Spaces Uploads.
+- `docker-entrypoint-wrapper.sh` installs the Redis `object-cache.php` drop-in and the Spaces must-use loader into each instance's `wp-content` on container start.
+- `plugins/do-spaces-uploads/` is the Spaces plugin source.
+- `docs/` holds [USAGE.md](docs/USAGE.md), [PRODUCTION.md](docs/PRODUCTION.md), and [SPACES.md](docs/SPACES.md).
+
+### Scripts
+
+| Script | Purpose |
+|---|---|
+| `./generate-env.sh` | Create or refresh `.env`, check capacity, size services, and regenerate Compose, Nginx, PHP pools, and database grants |
+| `./up.sh` / `./down.sh` | Start or stop the stack; `./up.sh` also runs `./provision-sites.sh` |
+| `./add-site.sh` | Add an instance (refused when over capacity) |
+| `./provision-sites.sh` | Create or update each instance's database and user |
+| `./backup.sh` / `./restore.sh` | Dump every database / restore one dump |
+| `./cron-setup.sh` | Install the daily 03:00 backup cron (run by `./generate-env.sh`) |
+| `./enable-ssl.sh` / `./renew-ssl.sh` | Issue / renew Let's Encrypt certificates |
+| `./change-url.sh` | Change one instance's URL in its database |
+| `./upgrade-wordpress.sh` | Rebuild the image and update WordPress core |
+| `./migrate-spaces.sh` | Move existing uploads to DigitalOcean Spaces |
+
+Details for each are in [docs/USAGE.md](docs/USAGE.md#scripts-reference).
 
 ### Content layout
 

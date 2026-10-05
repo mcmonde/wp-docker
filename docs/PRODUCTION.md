@@ -53,6 +53,19 @@ Do **not** expose `3306`, `6379`, `8080`, or `9000` publicly.
 
 Include **IPv6** if Docker publishes `[::]:80` and `[::]:443`.
 
+### Server sizing
+
+- [ ] The server has capacity for every instance: 1 vCPU and 2 GB for the first, plus 0.5 vCPU and 512 MB per extra weight-1 instance. `./generate-env.sh` refuses otherwise; do not use `FORCE_SITES=yes` in production. See [Site capacity](../README.md#site-capacity).
+- [ ] Swap is configured (2 GB on a 2 GB server, 1–2 GB on larger ones) so a burst does not get MariaDB killed.
+- [ ] `ALLOCATE_RESOURCES=yes` if one busy instance must not starve the others.
+- [ ] `PHP_WORKER_AVG_MB` matches real worker memory (120+ for WooCommerce or page builders).
+- [ ] After resizing the server, run `./generate-env.sh && ./up.sh` to re-tune.
+
+### Media storage
+
+- [ ] Decide whether uploads stay on the server (`sites/<id>/wp-content/uploads/`, include them in file backups) or go to DigitalOcean Spaces ([SPACES.md](SPACES.md)).
+- [ ] If using Spaces: real credentials in `sites/<id>.env`, CDN enabled if `SPACES_PUBLIC_URL` uses the CDN host, and existing uploads moved with `./migrate-spaces.sh`.
+
 ### Secrets
 
 - [ ] `.env` and `sites/*.env` are mode `600` and never committed.
