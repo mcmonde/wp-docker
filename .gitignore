@@ -70,9 +70,11 @@ id_ed25519
 *.pem
 !*.pem.example
 
-# Recreated by generate-env.sh for each instance.
+# Recreated by generate-env.sh, tuned to this server.
 php/pools/*.conf
 nginx/conf.d/*.conf
+mysql/my.cnf
+php/custom.ini
 
 # Real certificates placed next to the examples.
 certs/*.key
