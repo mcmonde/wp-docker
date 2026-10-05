@@ -467,12 +467,45 @@ cmd_resources() {
   fi
 }
 
+ask_first_site() {
+  local id domain
+  echo "Name the first site. The id names its container, database, and sites/<id>/ folder, and is hard to change later."
+  while :; do
+    read -r -p "Site id [default]: " id
+    id=${id:-default}
+    if [[ ! "$id" =~ ^[a-z][a-z0-9_]{0,15}$ ]]; then
+      echo "  Use a lowercase letter first, then lowercase letters, numbers, or underscores (16 characters max)."
+      continue
+    fi
+    case "$id" in
+      db|nginx|redis|certbot|phpmyadmin) echo "  '${id}' is reserved."; continue ;;
+    esac
+    break
+  done
+  while :; do
+    read -r -p "Domain [localhost]: " domain
+    domain=${domain:-localhost}
+    if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+$ ]] || [[ "$domain" == *..* ]]; then
+      echo "  Enter a hostname, for example blog.example.com or blog.localhost."
+      continue
+    fi
+    break
+  done
+  echo
+  bin/add-site.sh "$id" "$domain"
+}
+
 cmd_install() {
   local answer
+  local sites=(sites/*.env)
   if [ -f .env ]; then
     echo ".env already exists, so this is not a first install. Regenerating config instead."
+    bin/generate-env.sh
+  elif [ "${#sites[@]}" -eq 0 ] && [ -t 0 ]; then
+    ask_first_site
+  else
+    bin/generate-env.sh
   fi
-  bin/generate-env.sh
   echo
   echo "Before going public, check EMAIL in .env and DOMAIN / WP_HOME in sites/*.env."
   if [ -t 0 ]; then

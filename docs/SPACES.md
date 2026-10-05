@@ -25,7 +25,7 @@ You do **not** need to hand-add Spaces variables to `sites/<id>.env`. They are s
 
 | When | What happens |
 |---|---|
-| First `./wpd env:generate` (no site files yet) | Creates `sites/default.env`, then adds the Spaces block below |
+| `./wpd install` on a fresh checkout | Creates `sites/<id>.env` for the id you choose (or `sites/default.env` without a terminal), then adds the Spaces block below |
 | `./wpd site:add` | Creates `sites/<id>.env` and runs `./wpd env:generate`, which adds the block |
 | Every `./wpd env:generate` | Adds any **missing** `SPACES_*` keys. On sites with Spaces disabled, it also fills keys that are present but empty. Sites with `SPACES_ENABLED=yes` are never rewritten. |
 

@@ -39,7 +39,9 @@ Commands are grouped by prefix: `site:*`, `db:*`, `ssl:*`, `wp:*`, `spaces:*`. `
 ./wpd install
 ```
 
-`install` runs `./wpd env:generate`, then offers to start the stack. `env:generate` writes `.env` once and creates `sites/default.env` for the first instance. It generates the MariaDB root password, that instance's database password, and the WordPress authentication keys. Each site file also gets a DigitalOcean Spaces block with `SPACES_ENABLED=no` and placeholder credentials (see [Media in DigitalOcean Spaces](#media-in-digitalocean-spaces)). It asks whether WordPress containers should get Docker CPU and RAM caps and whether the stack should use only part of the server (see [Stack budget](#stack-budget-use-only-part-of-the-server)), then checks that the server has capacity for the instances and sizes MariaDB, Redis, and PHP (see [What is tuned](#what-is-tuned)). Later runs keep the secrets, backfill any missing `SPACES_*` keys, and re-tune for the current server and instance count.
+On a fresh checkout, `install` first asks for the first site's id (default `default`) and domain (default `localhost`). The id names the site's container, database, database user, Spaces prefix, and `sites/<id>/` folder, and is hard to change once the site has content, so pick it now, for example `blog` or `shop`. `install` then creates `sites/<id>.env` the same way `./wpd site:add` does, runs `./wpd env:generate`, and offers to start the stack. Run without a terminal (for example from a provisioning script), it skips the questions and creates `sites/default.env`. To choose the name non-interactively, run `./wpd site:add <id> <domain>` instead of `install` on the fresh checkout.
+
+`env:generate` writes `.env` once. It generates the MariaDB root password, that instance's database password, and the WordPress authentication keys. Each site file also gets a DigitalOcean Spaces block with `SPACES_ENABLED=no` and placeholder credentials (see [Media in DigitalOcean Spaces](#media-in-digitalocean-spaces)). It asks whether WordPress containers should get Docker CPU and RAM caps and whether the stack should use only part of the server (see [Stack budget](#stack-budget-use-only-part-of-the-server)), then checks that the server has capacity for the instances and sizes MariaDB, Redis, and PHP (see [What is tuned](#what-is-tuned)). Later runs keep the secrets, backfill any missing `SPACES_*` keys, and re-tune for the current server and instance count.
 
 On a 2 GB server, add 2 GB of swap before starting the stack.
 
@@ -47,7 +49,7 @@ On a 2 GB server, add 2 GB of swap before starting the stack.
 
 Answer yes to put Docker RAM and CPU caps on each WordPress container, split by `ALLOCATION_WEIGHT`. Answer no to leave WordPress containers uncapped. PHP workers are sized the same way either way, and MariaDB, Redis, and Nginx always keep their limits. Change the choice later by editing `ALLOCATE_RESOURCES` and running `./wpd env:generate` again.
 
-Edit `.env` for `EMAIL`, `PUID`, and `PGID`. Edit `sites/default.env` for the first instance:
+Edit `.env` for `EMAIL`, `PUID`, and `PGID`. Edit `sites/<id>.env` for the first instance:
 
 - `DOMAIN` is the bare hostname. `localhost` is fine for HTTP on this machine.
 - `WP_HOME` is the full site URL, including `http://` or `https://`.

@@ -39,12 +39,14 @@ WordPress core files live in a Docker volume per instance (`<id>_html`). Themes,
 ## First-time setup
 
 ```bash
-./wpd install         # env:generate (creates .env and sites/default.env, checks capacity, sizes services), then offers to start
+./wpd install         # asks for the first site's id and domain, creates sites/<id>.env and .env, checks capacity, sizes services, then offers to start
 # Edit .env: EMAIL, PUID, PGID if needed
-# Edit sites/default.env: DOMAIN, WP_HOME
+# Edit sites/<id>.env: DOMAIN, WP_HOME
 ./wpd up              # builds image, starts stack, creates databases (if not started during install)
 ./wpd status          # containers, health, and sites
 ```
+
+The site id (for example `blog`) becomes the container, database, database user, Spaces prefix, and `sites/<id>/` folder name, and is hard to change later. Pressing Enter keeps `default`. Without a terminal, `install` skips the questions and creates `sites/default.env` (database `wordpress`). To name the first site from a script, run `./wpd site:add <id> <domain>` on the fresh checkout instead of `install`.
 
 Open the site in a browser and complete the WordPress install wizard.
 
@@ -188,7 +190,7 @@ Every `sites/<id>.env` includes DigitalOcean Spaces keys with **`SPACES_ENABLED=
 
 | When | What happens |
 |---|---|
-| First `./wpd env:generate` | `sites/default.env` is created and gets the Spaces block |
+| `./wpd install` on a fresh checkout | `sites/<id>.env` is created for the id you choose (`sites/default.env` without a terminal) and gets the Spaces block |
 | `./wpd site:add` | The new site file gets the same block (via `./wpd env:generate`) |
 | Later `./wpd env:generate` runs | Missing `SPACES_*` keys are added. Empty keys are filled only while Spaces is disabled; enabled sites are never rewritten. |
 
