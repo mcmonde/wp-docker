@@ -70,6 +70,7 @@ class DO_Spaces_Uploads {
         add_filter('upload_dir', [$this, 'filter_upload_dir']);
         add_filter('wp_generate_attachment_metadata', [$this, 'handle_metadata'], 10, 2);
         add_filter('wp_get_attachment_url', [$this, 'filter_attachment_url'], 10, 2);
+        add_filter('wp_calculate_image_srcset', [$this, 'filter_srcset'], 10, 5);
         add_filter('get_attached_file', [$this, 'materialize_for_editing'], 10, 2);
         add_action('delete_attachment', [$this, 'delete_attachment']);
     }
@@ -125,20 +126,13 @@ class DO_Spaces_Uploads {
         }
 
         $base_dir = trailingslashit(dirname($file));
-        if (! empty($metadata['sizes']) && is_array($metadata['sizes'])) {
-            foreach ($metadata['sizes'] as $size) {
-                if (empty($size['file'])) {
-                    continue;
-                }
-                $size_path = $base_dir . $size['file'];
-                if (! is_readable($size_path)) {
-                    continue;
-                }
-                $size_key = $this->object_key_for_path($size_path);
-                $size_mime = $size['mime-type'] ?? 'image/jpeg';
-                if ($this->s3_client()->put_file($size_key, $size_path, $size_mime)) {
-                    @unlink($size_path);
-                }
+        foreach ($this->extra_files($metadata) as [$name, $extra_mime]) {
+            $extra_path = $base_dir . $name;
+            if (! is_readable($extra_path)) {
+                continue;
+            }
+            if ($this->s3_client()->put_file($this->object_key_for_path($extra_path), $extra_path, $extra_mime ?: $mime)) {
+                @unlink($extra_path);
             }
         }
 
@@ -153,7 +147,39 @@ class DO_Spaces_Uploads {
         if ($key) {
             return $this->public_url($key);
         }
+        $local_base = $this->local_base_url_if_pending($post_id);
+        if ($local_base !== null) {
+            return $local_base . '/' . $this->attachment_relative_path($post_id);
+        }
         return $url;
+    }
+
+    /**
+     * upload_dir points at Spaces, so srcset for media still on this server must be pointed back.
+     */
+    public function filter_srcset(array $sources, array $size_array, string $image_src, array $image_meta, int $attachment_id): array {
+        $local_base = $this->local_base_url_if_pending($attachment_id);
+        if ($local_base === null) {
+            return $sources;
+        }
+        $spaces_base = $this->public_base . ($this->prefix !== '' ? '/' . $this->prefix : '');
+        foreach ($sources as $width => $source) {
+            if (str_starts_with($source['url'], $spaces_base . '/')) {
+                $sources[$width]['url'] = $local_base . substr($source['url'], strlen($spaces_base));
+            }
+        }
+        return $sources;
+    }
+
+    private function local_base_url_if_pending(int $attachment_id): ?string {
+        if (get_post_meta($attachment_id, '_do_spaces_key', true)) {
+            return null;
+        }
+        $relative = $this->attachment_relative_path($attachment_id);
+        if ($relative === '' || ! is_readable($this->local_path_for_relative($relative))) {
+            return null;
+        }
+        return content_url('uploads');
     }
 
     /**
@@ -190,7 +216,31 @@ class DO_Spaces_Uploads {
     }
 
     /**
-     * Copy one attachment from sites/<id>/wp-content/uploads/ to Spaces.
+     * Thumbnails and the unscaled original WordPress keeps for large images, as [file name, mime].
+     *
+     * @return array<int, array{0: string, 1: string}>
+     */
+    private function extra_files($metadata): array {
+        $files = [];
+        if (! is_array($metadata)) {
+            return $files;
+        }
+        if (! empty($metadata['sizes']) && is_array($metadata['sizes'])) {
+            foreach ($metadata['sizes'] as $size) {
+                if (! empty($size['file'])) {
+                    $files[$size['file']] = [$size['file'], (string) ($size['mime-type'] ?? '')];
+                }
+            }
+        }
+        if (! empty($metadata['original_image'])) {
+            $files[$metadata['original_image']] = [$metadata['original_image'], ''];
+        }
+        return array_values($files);
+    }
+
+    /**
+     * Copy one attachment from sites/<id>/wp-content/uploads/ to Spaces. All of its files are
+     * uploaded before anything is marked or deleted; on any failure the uploaded objects are removed.
      *
      * @return string migrated|skipped|missing|failed
      */
@@ -213,8 +263,17 @@ class DO_Spaces_Uploads {
             return 'missing';
         }
 
-        $main_key = $this->object_key_for_relative($relative);
         $mime = get_post_mime_type($attachment_id) ?: 'application/octet-stream';
+        $files = [[$relative, $local_main, $mime]];
+
+        $dir = dirname($relative);
+        foreach ($this->extra_files(wp_get_attachment_metadata($attachment_id)) as [$name, $extra_mime]) {
+            $extra_relative = ($dir === '.' ? '' : $dir . '/') . $name;
+            $extra_local = $this->local_path_for_relative($extra_relative);
+            if (is_readable($extra_local)) {
+                $files[] = [$extra_relative, $extra_local, $extra_mime ?: $mime];
+            }
+        }
 
         if ($dry_run) {
             return 'migrated';
@@ -224,39 +283,112 @@ class DO_Spaces_Uploads {
             return 'failed';
         }
 
-        if (! $this->s3_client()->put_file($main_key, $local_main, $mime)) {
-            return 'failed';
-        }
-
-        update_post_meta($attachment_id, '_do_spaces_key', $main_key);
-        update_post_meta($attachment_id, '_do_spaces_relative', $relative);
-
-        $metadata = wp_get_attachment_metadata($attachment_id);
-        if (! empty($metadata['sizes']) && is_array($metadata['sizes'])) {
-            $dir = dirname($relative);
-            foreach ($metadata['sizes'] as $size) {
-                if (empty($size['file'])) {
-                    continue;
+        $uploaded = [];
+        foreach ($files as [$file_relative, $file_local, $file_mime]) {
+            $key = $this->object_key_for_relative($file_relative);
+            if (! $this->s3_client()->put_file($key, $file_local, $file_mime)) {
+                foreach ($uploaded as $done_key) {
+                    $this->s3_client()->delete_object($done_key);
                 }
-                $size_relative = ($dir === '.' ? '' : $dir . '/') . $size['file'];
-                $size_local = $this->local_path_for_relative($size_relative);
-                if (! is_readable($size_local)) {
-                    continue;
-                }
-                $size_key = $this->object_key_for_relative($size_relative);
-                $size_mime = $size['mime-type'] ?? 'image/jpeg';
-                if ($this->s3_client()->put_file($size_key, $size_local, $size_mime) && $delete_local) {
-                    @unlink($size_local);
-                }
+                return 'failed';
             }
+            $uploaded[] = $key;
         }
+
+        update_post_meta($attachment_id, '_do_spaces_key', $uploaded[0]);
+        update_post_meta($attachment_id, '_do_spaces_relative', $relative);
+        delete_transient('do_spaces_pending_count');
 
         if ($delete_local) {
-            @unlink($local_main);
+            foreach ($files as [, $file_local]) {
+                @unlink($file_local);
+            }
             $this->cleanup_local_upload_path(dirname($local_main));
         }
 
         return 'migrated';
+    }
+
+    /**
+     * Attachments not yet in Spaces whose main file is still in wp-content/uploads/.
+     *
+     * @param int[] $exclude
+     * @return int[]
+     */
+    public function pending_local_ids(int $limit = -1, array $exclude = []): array {
+        $pending = [];
+        $page = 1;
+        do {
+            $ids = get_posts([
+                'post_type' => 'attachment',
+                'post_status' => 'inherit',
+                'fields' => 'ids',
+                'posts_per_page' => 200,
+                'paged' => $page,
+                'orderby' => 'ID',
+                'order' => 'ASC',
+                'post__not_in' => array_map('intval', $exclude),
+                'no_found_rows' => true,
+                'meta_query' => [
+                    ['key' => '_do_spaces_key', 'compare' => 'NOT EXISTS'],
+                ],
+            ]);
+            foreach ($ids as $id) {
+                $relative = $this->attachment_relative_path((int) $id);
+                if ($relative !== '' && is_readable($this->local_path_for_relative($relative))) {
+                    $pending[] = (int) $id;
+                    if ($limit > 0 && count($pending) >= $limit) {
+                        return $pending;
+                    }
+                }
+            }
+            $page++;
+        } while (count($ids) === 200);
+
+        return $pending;
+    }
+
+    /**
+     * Uploads and deletes a small object to prove the key can write to the bucket and prefix.
+     *
+     * @return array{ok: bool, message: string}
+     */
+    public function test_connection(): array {
+        if (! $this->is_enabled()) {
+            return ['ok' => false, 'message' => 'Spaces is disabled or missing settings.'];
+        }
+
+        $key = $this->object_key_for_relative('.do-spaces-check-' . wp_generate_password(8, false));
+        $tmp = tempnam(sys_get_temp_dir(), 'do-spaces-check');
+        if ($tmp === false || file_put_contents($tmp, 'ok') === false) {
+            return ['ok' => false, 'message' => 'Could not write a temporary file for the test.'];
+        }
+        $put = $this->s3_client()->put_file($key, $tmp, 'text/plain');
+        @unlink($tmp);
+        if (! $put) {
+            return ['ok' => false, 'message' => 'Upload test failed. Check the key, secret, bucket, region, and endpoint, and that the key can write to this bucket.'];
+        }
+        if (! $this->s3_client()->delete_object($key)) {
+            return ['ok' => false, 'message' => 'Upload worked but deleting the test object failed. The key needs delete permission so removed media is cleaned up.'];
+        }
+        return ['ok' => true, 'message' => 'Upload and delete worked.'];
+    }
+
+    /**
+     * Non-secret settings for display.
+     *
+     * @return array<string, string>
+     */
+    public function config_summary(): array {
+        $key = defined('DO_SPACES_KEY') ? (string) DO_SPACES_KEY : '';
+        return [
+            'Bucket' => defined('DO_SPACES_BUCKET') ? (string) DO_SPACES_BUCKET : '',
+            'Region' => defined('DO_SPACES_REGION') ? (string) DO_SPACES_REGION : '',
+            'Endpoint' => defined('DO_SPACES_ENDPOINT') ? (string) DO_SPACES_ENDPOINT : '',
+            'Public URL' => $this->public_base,
+            'Prefix' => $this->prefix,
+            'Access key' => $key !== '' ? substr($key, 0, 4) . str_repeat('•', 8) : '',
+        ];
     }
 
     public function local_uploads_dir(): string {
@@ -270,20 +402,41 @@ class DO_Spaces_Uploads {
         }
 
         $metadata = wp_get_attachment_metadata($post_id);
-        if (empty($metadata['sizes']) || empty($metadata['file'])) {
+        if (! $key) {
+            $this->delete_pending_local_files($post_id, $metadata);
+            return;
+        }
+        if (empty($metadata['file'])) {
             return;
         }
 
         $dir = dirname($metadata['file']);
-        foreach ($metadata['sizes'] as $size) {
-            if (empty($size['file'])) {
-                continue;
-            }
-            $size_key = $this->prefix !== ''
-                ? $this->prefix . '/' . $dir . '/' . $size['file']
-                : $dir . '/' . $size['file'];
-            $this->s3_client()->delete_object($size_key);
+        foreach ($this->extra_files($metadata) as [$name]) {
+            $this->s3_client()->delete_object($this->object_key_for_relative(($dir === '.' ? '' : $dir . '/') . $name));
         }
+    }
+
+    /**
+     * WordPress deletes files relative to upload_dir (the staging dir), so media that never reached
+     * Spaces would otherwise stay in wp-content/uploads/.
+     */
+    private function delete_pending_local_files(int $post_id, $metadata): void {
+        $relative = $this->attachment_relative_path($post_id);
+        if ($relative === '') {
+            return;
+        }
+        $main = $this->local_path_for_relative($relative);
+        $dir = dirname($relative);
+        $paths = [$main];
+        foreach ($this->extra_files($metadata) as [$name]) {
+            $paths[] = $this->local_path_for_relative(($dir === '.' ? '' : $dir . '/') . $name);
+        }
+        foreach ($paths as $path) {
+            if (is_file($path)) {
+                @unlink($path);
+            }
+        }
+        $this->cleanup_local_upload_path(dirname($main));
     }
 
     private function object_key_for_path(string $absolute_path): string {

@@ -121,9 +121,34 @@ The Space (or prefix) must allow **public read** for media URLs to work in brows
 
 ---
 
+## Admin page (Media → DO Spaces)
+
+Administrators (`manage_options`) get a page under **Media → DO Spaces**. Settings are read-only there; they come from `sites/<id>.env`.
+
+| Section | What it shows or does |
+|---|---|
+| Status | Whether Spaces is enabled, bucket, region, endpoint, public URL, prefix, and the first 4 characters of the access key. The secret is never shown. |
+| Connection | Uploads a small `.do-spaces-check-*` object under the prefix and deletes it again. **Test again** re-runs it. The result is cached for an hour when it passes and 5 minutes when it fails. |
+| Media still on this server | Attachments with no Spaces metadata whose file still exists in `wp-content/uploads/`. |
+| Upload server media to Spaces | Shown only when Spaces is enabled, the connection test passes, and server media exists. Uploads 5 attachments per request with a progress bar. **Keep a copy on the server** keeps the local files. **Stop after this batch** pauses; reloading the page resumes with whatever is left. Failed attachments are listed, stay on the server, and are retried on the next run. |
+
+While server media is waiting and the connection works, administrators see a notice on other admin screens linking to the page. Dismissing it hides it until the number of waiting files changes.
+
+When Spaces is disabled, the page shows the local media count and how to enable Spaces.
+
+Media that is still on the server keeps working while Spaces is enabled: its URLs and `srcset` point at `wp-content/uploads/` until it is uploaded, and deleting it in wp-admin removes the local files.
+
+For large libraries, `./wpd spaces:migrate` is faster than the admin page.
+
+---
+
 ## Verify
 
-Upload an image in WordPress admin, then check:
+```bash
+./wpd wp blog do-spaces test
+```
+
+`do-spaces test` runs the same upload-and-delete check as the admin page and exits non-zero on failure. Then upload an image in WordPress admin and check:
 
 - The attachment URL uses your `SPACES_PUBLIC_URL` (or bucket URL).
 - The file is **not** kept on the server under `sites/<id>/wp-content/uploads/` (except briefly during upload).
@@ -176,7 +201,9 @@ docker compose build
 ./wpd spaces:migrate
 ```
 
-The command uploads each attachment and its registered thumbnail sizes, sets Spaces metadata, and by default **deletes local files** under `wp-content/uploads/`.
+The command uploads each attachment with its registered thumbnail sizes and, for large images, the unscaled original WordPress keeps (`original_image`). An attachment is switched to Spaces only after all of its files uploaded; if any file fails, the objects already uploaded for it are removed and its local files are left alone. After a successful upload it sets Spaces metadata and by default **deletes local files** under `wp-content/uploads/`.
+
+You can do the same from wp-admin under **Media → DO Spaces** (see [Admin page](#admin-page-media--do-spaces)).
 
 ### 4. Fix hard-coded URLs in post content (if needed)
 
@@ -225,7 +252,7 @@ New uploads stay on the server again. Objects already in Spaces are not deleted 
 
 | Path | Purpose |
 |---|---|
-| `plugins/do-spaces-uploads/` | Source in this repository |
+| `plugins/do-spaces-uploads/` | Source in this repository. Plugin internals, constants, hooks, stored data, and known limitations: [README](../plugins/do-spaces-uploads/README.md), [CHANGELOG](../plugins/do-spaces-uploads/CHANGELOG.md) |
 | `/opt/do-spaces-uploads/` | Copy inside the PHP container |
 | `wp-content/mu-plugins/do-spaces-uploads.php` | Loader (auto-installed on container start) |
 
@@ -237,7 +264,9 @@ Configuration is injected via `WORDPRESS_CONFIG_EXTRA` in `docker-compose.sites.
 
 | Problem | Check |
 |---|---|
-| Upload fails | Spaces key/secret, bucket name, region; PHP container logs |
+| Upload fails | `./wpd wp blog do-spaces test`; Spaces key/secret, bucket name, region; PHP container logs |
+| Test says delete failed | The access key needs delete permission so removed media is cleaned up in Spaces |
+| Admin page has no upload button | Spaces disabled, connection test failing, or no media left on the server |
 | URL is local, not CDN | `SPACES_PUBLIC_URL`; `./wpd env:generate && ./wpd up` |
 | 403 in browser | Bucket or object ACL / CDN not public for reads |
 | Plugin not loading | Rebuild image (`docker compose build`); loader at `mu-plugins/do-spaces-uploads.php` |

@@ -140,9 +140,10 @@ docker compose build
 ./wpd up
 ```
 
-Move existing uploads with:
+In wp-admin, **Media → DO Spaces** shows the settings (without the secret), tests the connection with a real upload and delete, counts media still on the server, and, when the test passes, uploads it to Spaces in small batches with a progress bar. Administrators also get a notice on other admin screens while server media is waiting. From the command line:
 
 ```bash
+./wpd wp blog do-spaces test
 ./wpd spaces:migrate blog --dry-run
 ./wpd spaces:migrate blog
 ```
@@ -274,7 +275,7 @@ Redis requires a password (`REDIS_PASSWORD` in `.env`). Object caching uses the 
 - `docker-compose.ssl.yml` publishes port 443 once a certificate exists.
 - `Dockerfile` builds on the official `wordpress:<version>-php<version>-fpm-alpine` image and adds WP-CLI and the Redis Object Cache plugin (both version-pinned and checksum-verified), DO Spaces Uploads, and a PHP-FPM health check. To change a pinned version, update its checksum `ARG` too.
 - `docker-entrypoint-wrapper.sh` installs the Redis `object-cache.php` drop-in and the Spaces must-use loader into each instance's `wp-content` on container start.
-- `plugins/do-spaces-uploads/` is the Spaces plugin source.
+- `plugins/do-spaces-uploads/` is the Spaces plugin source, with its own [README](plugins/do-spaces-uploads/README.md) and [CHANGELOG](plugins/do-spaces-uploads/CHANGELOG.md).
 - `docs/` holds [USAGE.md](docs/USAGE.md), [PRODUCTION.md](docs/PRODUCTION.md), and [SPACES.md](docs/SPACES.md).
 
 ### Commands

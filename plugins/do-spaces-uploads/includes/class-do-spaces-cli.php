@@ -152,6 +152,23 @@ class DO_Spaces_CLI {
         WP_CLI::log('On Spaces: ' . $on_spaces);
         WP_CLI::log('Still on disk: ' . $on_disk);
         WP_CLI::log('Missing locally and not on Spaces: ' . $missing);
+        WP_CLI::log('Ready to upload (on disk, not on Spaces): ' . count($service->pending_local_ids()));
+    }
+
+    /**
+     * Check the Spaces settings by uploading and deleting a small test object.
+     *
+     * ## EXAMPLES
+     *
+     *     wp do-spaces test
+     */
+    public function test(array $args, array $assoc_args): void {
+        unset($args, $assoc_args);
+        $result = $this->require_spaces_enabled()->test_connection();
+        if (! $result['ok']) {
+            WP_CLI::error($result['message']);
+        }
+        WP_CLI::success($result['message']);
     }
 }
 
