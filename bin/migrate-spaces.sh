@@ -1,16 +1,16 @@
 #!/bin/bash
 # Upload existing wp-content/uploads media to DigitalOcean Spaces for one or more sites.
-# Usage: ./migrate-spaces.sh [SITE_ID ...] [--dry-run] [--keep-local] [--force] [--limit=N] [--offset=N]
-# Example: ./migrate-spaces.sh blog --dry-run
-# Example: ./migrate-spaces.sh blog default --limit=100
+# Usage: ./wpd spaces:migrate [SITE_ID ...] [--dry-run] [--keep-local] [--force] [--limit=N] [--offset=N]
+# Example: ./wpd spaces:migrate blog --dry-run
+# Example: ./wpd spaces:migrate blog default --limit=100
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 shopt -s nullglob
 
 if [ ! -f .env ]; then
-  echo ".env not found. Run ./generate-env.sh first." >&2
+  echo ".env not found. Run ./wpd env:generate first." >&2
   exit 1
 fi
 

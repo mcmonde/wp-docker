@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 shopt -s nullglob
 
 FORCE_SITES_CLI=${FORCE_SITES:-}
@@ -205,6 +205,62 @@ ask_allocation() {
     echo "ALLOCATE_RESOURCES was not set. Defaulting to yes. Set it to no in .env to leave WordPress containers unlimited."
   fi
   echo "Allocation is ${ALLOCATE_RESOURCES}."
+}
+
+# Prints MB for "4096", "4096M", or "4G"; fails on anything else.
+parse_ram_mb() {
+  local raw=${1^^}
+  if [[ "$raw" =~ ^([0-9]+)(M|MB)?$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  elif [[ "$raw" =~ ^([0-9]+)(G|GB)$ ]]; then
+    printf '%s' $((BASH_REMATCH[1] * 1024))
+  else
+    return 1
+  fi
+}
+
+# Asks once whether the stack should use only part of the host. Sets STACK_CPU_CORES and STACK_RAM_MB
+# (empty means the whole host).
+ask_budget() {
+  local answer cores ram ram_mb
+  STACK_CPU_CORES=
+  STACK_RAM_MB=
+  if [ ! -t 0 ]; then
+    echo "No stack budget set; sizing for the whole host. Set STACK_CPU_CORES and STACK_RAM_MB in .env to limit it."
+    return
+  fi
+  echo "This server has ${HOST_CPU_CORES} CPU cores and ${HOST_RAM_MB}MB RAM."
+  echo "You can limit how much of it this stack may use, for example on a shared machine or to simulate a smaller server."
+  echo "On a dedicated server, use all of it."
+  read -r -p "Limit CPU and RAM for this stack? [y/N] " answer
+  case "${answer,,}" in
+    y|yes) ;;
+    n|no|"")
+      echo "Using the whole server."
+      return
+      ;;
+    *)
+      echo "Answer yes or no." >&2
+      exit 1
+      ;;
+  esac
+  while true; do
+    read -r -p "CPU cores to use (1-${HOST_CPU_CORES}): " cores
+    if [[ "$cores" =~ ^[1-9][0-9]*$ ]] && [ "$cores" -le "$HOST_CPU_CORES" ]; then
+      break
+    fi
+    echo "Enter a whole number from 1 to ${HOST_CPU_CORES}."
+  done
+  while true; do
+    read -r -p "RAM to use, e.g. 4G or 4096M (at most ${HOST_RAM_MB}M): " ram
+    if ram_mb=$(parse_ram_mb "$ram") && [ "$ram_mb" -ge 1 ] && [ "$ram_mb" -le "$HOST_RAM_MB" ]; then
+      break
+    fi
+    echo "Enter a size like 4G or 4096M, no more than ${HOST_RAM_MB}M."
+  done
+  STACK_CPU_CORES=$cores
+  STACK_RAM_MB=$ram_mb
+  echo "Stack budget: ${cores} cores, ${ram_mb}MB RAM (fits a total site weight of $(site_capacity "$ram_mb" $((cores * 1000))))."
 }
 
 format_cpus() {
@@ -513,7 +569,7 @@ EMAIL=changeme@example.com
 MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
 REDIS_PASSWORD=${REDIS_PASSWORD}
 
-# AUTO_TUNE=yes re-detects host RAM and CPU on every ./generate-env.sh run and rewrites the
+# AUTO_TUNE=yes re-detects host RAM and CPU on every ./wpd env:generate run and rewrites the
 # MariaDB, Redis, Nginx, and WordPress budget values below for the current site count.
 # Set AUTO_TUNE=no to keep hand-edited values.
 AUTO_TUNE=yes
@@ -543,7 +599,10 @@ UPLOAD_MAX=${UPLOAD_DEFAULT}
 FASTCGI_TIMEOUT=${FASTCGI_DEFAULT}
 OPCACHE_MEMORY_MB=${OPCACHE_DEFAULT}
 
-# Host snapshot, refreshed on every run.
+# Detected host and the CPU/RAM the stack is sized for (the stack budget, or the whole host).
+# Refreshed on every run.
+HOST_RAM_MB=${TOTAL_RAM_MB}
+HOST_CPU_CORES=${CPU_CORES}
 TOTAL_RAM_MB=${TOTAL_RAM_MB}
 CPU_CORES=${CPU_CORES}
 EOF
@@ -604,8 +663,46 @@ if secret_needs_generation "${REDIS_PASSWORD:-}"; then
   chmod 600 .env
 fi
 
-TOTAL_RAM_MB=$(free -m | awk '/Mem:/ {print $2}')
-CPU_CORES=$(nproc)
+HOST_RAM_MB=$(free -m | awk '/Mem:/ {print $2}')
+HOST_CPU_CORES=$(nproc)
+
+if ! grep -q '^STACK_CPU_CORES=' .env; then
+  ask_budget
+  cat >> .env <<EOF
+
+# Stack budget. Empty uses the whole host. When set, the stack is sized as if the server had
+# this many cores and MB of RAM, every container is pinned to those cores, and RAM caps
+# (without swap) are applied to every container, WordPress included.
+STACK_CPU_CORES=${STACK_CPU_CORES}
+STACK_RAM_MB=${STACK_RAM_MB}
+EOF
+fi
+ensure_var STACK_RAM_MB ""
+
+STACK_CPU_CORES=${STACK_CPU_CORES:-}
+STACK_RAM_MB=${STACK_RAM_MB:-}
+STACK_CPUSET=
+CPU_CORES=$HOST_CPU_CORES
+TOTAL_RAM_MB=$HOST_RAM_MB
+if [ -n "$STACK_CPU_CORES" ]; then
+  if [[ ! "$STACK_CPU_CORES" =~ ^[1-9][0-9]*$ ]] || [ "$STACK_CPU_CORES" -gt "$HOST_CPU_CORES" ]; then
+    echo "STACK_CPU_CORES=${STACK_CPU_CORES} must be a whole number from 1 to ${HOST_CPU_CORES} (this host's cores), or empty." >&2
+    exit 1
+  fi
+  CPU_CORES=$STACK_CPU_CORES
+  STACK_CPUSET=0
+  if [ "$CPU_CORES" -gt 1 ]; then STACK_CPUSET="0-$((CPU_CORES - 1))"; fi
+fi
+if [ -n "$STACK_RAM_MB" ]; then
+  if ! stack_ram=$(parse_ram_mb "$STACK_RAM_MB") || [ "$stack_ram" -lt 1 ] || [ "$stack_ram" -gt "$HOST_RAM_MB" ]; then
+    echo "STACK_RAM_MB=${STACK_RAM_MB} must be a size like 4096, 4096M, or 4G, no more than this host's ${HOST_RAM_MB}MB, or empty." >&2
+    exit 1
+  fi
+  TOTAL_RAM_MB=$stack_ram
+fi
+
+set_env_var HOST_RAM_MB "$HOST_RAM_MB"
+set_env_var HOST_CPU_CORES "$HOST_CPU_CORES"
 set_env_var TOTAL_RAM_MB "$TOTAL_RAM_MB"
 set_env_var CPU_CORES "$CPU_CORES"
 
@@ -798,12 +895,22 @@ capacity_problem() {
   fi
 }
 
+capacity_subject="This host"
+if [ -n "$STACK_CPU_CORES" ] || [ -n "$STACK_RAM_MB" ]; then
+  capacity_subject="The stack budget"
+fi
 SITE_CAPACITY=$(site_capacity "$TOTAL_RAM_MB" $((CPU_CORES * 1000)))
 if [ "$SITE_CAPACITY" -lt 1 ]; then
-  capacity_problem "This host (${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM) is below the 1 vCPU / 2 GB minimum for one site."
+  capacity_problem "${capacity_subject} (${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM) is below the 1 vCPU / 2 GB minimum for one site."
 elif [ "$total_weight" -gt "$SITE_CAPACITY" ]; then
-  capacity_problem "This host (${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM) supports a total site weight of ${SITE_CAPACITY}, but the sites add up to ${total_weight}. The first site needs 1 vCPU and 2 GB; each extra weight-1 site needs 0.5 vCPU and 512MB."
+  capacity_problem "${capacity_subject} (${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM) supports a total site weight of ${SITE_CAPACITY}, but the sites add up to ${total_weight}. The first site needs 1 vCPU and 2 GB; each extra weight-1 site needs 0.5 vCPU and 512MB."
 fi
+
+set_env_var SITE_CAPACITY "$SITE_CAPACITY"
+
+# A RAM budget caps every WordPress container even without ALLOCATE_RESOURCES.
+CAP_WP_MEM=$ALLOCATE_RESOURCES
+if [ -n "$STACK_RAM_MB" ]; then CAP_WP_MEM=yes; fi
 
 if [ "$AUTO_TUNE" = "yes" ]; then
   auto_size_services "$total_weight"
@@ -864,15 +971,16 @@ for index in "${!SITE_IDS[@]}"; do
   size_site_pool "$share_mb" $((worker_cap * SITE_WEIGHTS[index] / total_weight))
   total_children=$((total_children + PHP_CHILDREN))
 
-  if [ "$ALLOCATE_RESOURCES" = "yes" ]; then
+  site_mem_limit=unlimited
+  site_cpu_limit=unlimited
+  if [ "$CAP_WP_MEM" = "yes" ]; then
     if [ "$share_mb" -lt $((OPCACHE_MB + FPM_MASTER_MB + PHP_LIMIT_MB)) ]; then
       echo "Warning: site '${id}' has a ${share_mb}MB RAM cap; one request reaching PHP_MEMORY_LIMIT (${PHP_LIMIT_MB}MB) could be stopped by it." >&2
     fi
     site_mem_limit="${share_mb}m"
+  fi
+  if [ "$ALLOCATE_RESOURCES" = "yes" ]; then
     site_cpu_limit=$(format_cpus "${SITE_CPU_MILLI[$index]}")
-  else
-    site_mem_limit=unlimited
-    site_cpu_limit=unlimited
   fi
 
   SITE_MEMS+=("$site_mem_limit")
@@ -883,6 +991,8 @@ for index in "${!SITE_IDS[@]}"; do
   SITE_MAXS+=("$MAX_SPARE")
   upsert_file_var "${site_files[$index]}" SITE_MEM_LIMIT "$site_mem_limit"
   upsert_file_var "${site_files[$index]}" SITE_CPU_LIMIT "$site_cpu_limit"
+  upsert_file_var "${site_files[$index]}" SITE_MEM_SHARE_MB "$share_mb"
+  upsert_file_var "${site_files[$index]}" SITE_CPU_SHARE_MILLI "${SITE_CPU_MILLI[$index]}"
   upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MAX_CHILDREN "$PHP_CHILDREN"
   upsert_file_var "${site_files[$index]}" PHP_FPM_PM_START_SERVERS "$START_SERVERS"
   upsert_file_var "${site_files[$index]}" PHP_FPM_PM_MIN_SPARE_SERVERS "$MIN_SPARE"
@@ -981,10 +1091,17 @@ chmod 600 mysql/init/sites.sql
     id=${SITE_IDS[$index]}
     limit_yaml=""
     secret_yaml=""
+    if [ "$CAP_WP_MEM" = "yes" ]; then
+      limit_yaml+="    mem_limit: ${SITE_MEMS[$index]}"$'\n'
+    fi
+    if [ -n "$STACK_RAM_MB" ]; then
+      limit_yaml+="    memswap_limit: ${SITE_MEMS[$index]}"$'\n'
+    fi
     if [ "$ALLOCATE_RESOURCES" = "yes" ]; then
-      limit_yaml="    mem_limit: ${SITE_MEMS[$index]}
-    cpus: \"${SITE_CPUS[$index]}\"
-"
+      limit_yaml+="    cpus: \"${SITE_CPUS[$index]}\""$'\n'
+    fi
+    if [ -n "$STACK_CPUSET" ]; then
+      limit_yaml+="    cpuset: \"${STACK_CPUSET}\""$'\n'
     fi
     for key in "${WP_SECRET_KEYS[@]}"; do
       secret_yaml+="      WORDPRESS_${key}: $(yaml_quote "$(site_get "${site_files[$index]}" "$key")")"$'\n'
@@ -1030,7 +1147,31 @@ $(spaces_config_extra "${site_files[$index]}" "$id")
 EOF
   done
 
+  # The stack budget also pins and caps the shared services from docker-compose.yml.
+  for service in db redis phpmyadmin; do
+    service_yaml=""
+    if [ -n "$STACK_CPUSET" ]; then
+      service_yaml+="    cpuset: \"${STACK_CPUSET}\""$'\n'
+    fi
+    if [ -n "$STACK_RAM_MB" ]; then
+      case "$service" in
+        db) service_yaml+="    memswap_limit: \${DB_MEM_LIMIT}"$'\n' ;;
+        redis) service_yaml+="    memswap_limit: \${REDIS_MEM_LIMIT}"$'\n' ;;
+        phpmyadmin) service_yaml+="    memswap_limit: 256m"$'\n' ;;
+      esac
+    fi
+    if [ -n "$service_yaml" ]; then
+      printf '  %s:\n%s' "$service" "$service_yaml"
+    fi
+  done
+
   echo "  nginx:"
+  if [ -n "$STACK_CPUSET" ]; then
+    echo "    cpuset: \"${STACK_CPUSET}\""
+  fi
+  if [ -n "$STACK_RAM_MB" ]; then
+    echo "    memswap_limit: \${NGINX_MEM_LIMIT:-256m}"
+  fi
   echo "    depends_on:"
   for id in "${SITE_IDS[@]}"; do
     echo "      ${id}:"
@@ -1061,6 +1202,7 @@ pm = ondemand
 pm.max_children = ${SITE_CHILDREN[$index]}
 pm.process_idle_timeout = 10s
 pm.max_requests = 500
+ping.path = /fpm-ping
 EOF
   else
     cat > "php/pools/${id}.conf" <<EOF
@@ -1072,6 +1214,7 @@ pm.start_servers = ${SITE_STARTS[$index]}
 pm.min_spare_servers = ${SITE_MINS[$index]}
 pm.max_spare_servers = ${SITE_MAXS[$index]}
 pm.max_requests = 500
+ping.path = /fpm-ping
 EOF
   fi
 
@@ -1245,13 +1388,26 @@ if [ "$any_ssl" = "yes" ]; then
 fi
 set_env_var COMPOSE_FILE "$compose_file"
 
-echo "Host: ${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM. Capacity: total site weight ${SITE_CAPACITY}; in use: ${total_weight}."
+if [ "$capacity_subject" = "This host" ]; then
+  echo "Host: ${CPU_CORES} vCPU, ${TOTAL_RAM_MB}MB RAM. Capacity: total site weight ${SITE_CAPACITY}; in use: ${total_weight}."
+else
+  budget_note="${CPU_CORES} vCPU"
+  if [ -n "$STACK_CPUSET" ]; then budget_note+=" (cores ${STACK_CPUSET})"; fi
+  budget_note+=", ${TOTAL_RAM_MB}MB RAM"
+  if [ -n "$STACK_RAM_MB" ]; then budget_note+=" (no swap)"; fi
+  echo "Host: ${HOST_CPU_CORES} vCPU, ${HOST_RAM_MB}MB RAM. Stack budget: ${budget_note}. Capacity: total site weight ${SITE_CAPACITY}; in use: ${total_weight}."
+fi
 echo "Services: MariaDB ${DB_MEM_LIMIT} (buffer pool ${INNODB_BUFFER_POOL_SIZE}, ${MAX_CONNECTIONS} connections), Redis ${REDIS_MEM_LIMIT}, WordPress budget ${total_wp_mb}MB. AUTO_TUNE=${AUTO_TUNE}."
 echo "PHP: memory_limit ${PHP_MEMORY_LIMIT}, OPcache ${OPCACHE_MB}MB, ${PHP_WORKER_AVG_MB}MB average worker, pm=${PHP_FPM_PM}."
 if [ "$ALLOCATE_RESOURCES" = "yes" ]; then
   echo "Configured ${SITE_COUNT} site(s) with Docker CPU and RAM caps:"
   for index in "${!SITE_IDS[@]}"; do
     echo "  ${SITE_IDS[$index]}: ${SITE_CHILDREN[$index]} workers, ${SITE_MEMS[$index]} RAM, ${SITE_CPUS[$index]} CPUs (weight ${SITE_WEIGHTS[$index]})"
+  done
+elif [ "$CAP_WP_MEM" = "yes" ]; then
+  echo "Configured ${SITE_COUNT} site(s) with Docker RAM caps from the stack budget (no per-site CPU caps):"
+  for index in "${!SITE_IDS[@]}"; do
+    echo "  ${SITE_IDS[$index]}: ${SITE_CHILDREN[$index]} workers, ${SITE_MEMS[$index]} RAM (weight ${SITE_WEIGHTS[$index]})"
   done
 else
   echo "Configured ${SITE_COUNT} site(s) with no Docker CPU or RAM caps:"
@@ -1260,5 +1416,5 @@ else
   done
 fi
 
-./provision-sites.sh
-./cron-setup.sh
+bin/provision-sites.sh
+bin/cron-setup.sh

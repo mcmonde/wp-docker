@@ -1,13 +1,13 @@
 #!/bin/bash
 # Replace a site URL in that site's database, then flush its rewrites and cache.
-# Usage: ./change-url.sh SITE_ID https://old.example https://new.example
+# Usage: ./wpd site:url SITE_ID https://old.example https://new.example
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ "$#" -ne 3 ]; then
-  echo "Usage: ./change-url.sh SITE_ID OLD_URL NEW_URL" >&2
+  echo "Usage: ./wpd site:url SITE_ID OLD_URL NEW_URL" >&2
   exit 1
 fi
 
@@ -16,7 +16,7 @@ OLD_URL=$2
 NEW_URL=$3
 
 if [ ! -f ".env" ] || [ ! -f "sites/${site_id}.env" ]; then
-  echo "Missing .env or sites/${site_id}.env. Run ./generate-env.sh first." >&2
+  echo "Missing .env or sites/${site_id}.env. Run ./wpd env:generate first." >&2
   exit 1
 fi
 

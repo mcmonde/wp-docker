@@ -1,10 +1,10 @@
 #!/bin/bash
 # Renew the Let's Encrypt certificate and reload Nginx.
-# enable-ssl.sh installs this on a daily cron.
+# ./wpd ssl:enable installs this on a daily cron.
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ -f .env ]; then
   set -a

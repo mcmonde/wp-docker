@@ -1,14 +1,14 @@
 #!/bin/bash
 # Add a WordPress site, then regenerate Compose, Nginx, and database config.
-# Usage: ./add-site.sh SITE_ID DOMAIN [WP_HOME|ALLOCATION_WEIGHT] [ALLOCATION_WEIGHT]
+# Usage: ./wpd site:add SITE_ID DOMAIN [WP_HOME|ALLOCATION_WEIGHT] [ALLOCATION_WEIGHT]
 # Refused when the server is over capacity; prefix with FORCE_SITES=yes to override (e.g. benchmarks).
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
-  echo "Usage: ./add-site.sh SITE_ID DOMAIN [WP_HOME|ALLOCATION_WEIGHT] [ALLOCATION_WEIGHT]" >&2
+  echo "Usage: ./wpd site:add SITE_ID DOMAIN [WP_HOME|ALLOCATION_WEIGHT] [ALLOCATION_WEIGHT]" >&2
   exit 1
 fi
 
@@ -85,9 +85,9 @@ chmod 600 "sites/${site_id}.env"
 umask 022
 
 echo "Created sites/${site_id}.env."
-if ! ./generate-env.sh; then
+if ! bin/generate-env.sh; then
   rm -f "sites/${site_id}.env"
-  echo "Removed sites/${site_id}.env because ./generate-env.sh failed. Nothing was added." >&2
+  echo "Removed sites/${site_id}.env because env:generate failed. Nothing was added." >&2
   exit 1
 fi
-echo "Site '${site_id}' is configured. Start it with ./up.sh"
+echo "Site '${site_id}' is configured. Start it with ./wpd up"

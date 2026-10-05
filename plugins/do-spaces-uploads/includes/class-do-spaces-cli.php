@@ -12,7 +12,7 @@ class DO_Spaces_CLI {
 
     private function require_spaces_enabled(): DO_Spaces_Uploads {
         if (! defined('DO_SPACES_ENABLED') || ! DO_SPACES_ENABLED) {
-            WP_CLI::error('DO Spaces is disabled. Set SPACES_ENABLED=yes in sites/<id>.env, run ./generate-env.sh, and ./up.sh.');
+            WP_CLI::error('DO Spaces is disabled. Set SPACES_ENABLED=yes in sites/<id>.env, run ./wpd env:generate, and ./wpd up.');
         }
 
         $service = DO_Spaces_Uploads::instance();

@@ -1,10 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ ! -f docker-compose.sites.yml ]; then
-  echo "Run ./generate-env.sh first." >&2
+  echo "Run ./wpd env:generate first." >&2
   exit 1
 fi
 
@@ -16,4 +16,4 @@ if [ -f .env ]; then
 fi
 
 docker compose up -d --remove-orphans
-./provision-sites.sh
+bin/provision-sites.sh

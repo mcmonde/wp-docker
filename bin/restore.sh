@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 BACKUP_DIR="./backups"
 ENV_FILE=".env"

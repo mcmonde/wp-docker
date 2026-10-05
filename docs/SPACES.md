@@ -25,9 +25,9 @@ You do **not** need to hand-add Spaces variables to `sites/<id>.env`. They are s
 
 | When | What happens |
 |---|---|
-| First `./generate-env.sh` (no site files yet) | Creates `sites/default.env`, then adds the Spaces block below |
-| `./add-site.sh` | Creates `sites/<id>.env` and runs `./generate-env.sh`, which adds the block |
-| Every `./generate-env.sh` | Adds any **missing** `SPACES_*` keys. On sites with Spaces disabled, it also fills keys that are present but empty. Sites with `SPACES_ENABLED=yes` are never rewritten. |
+| First `./wpd env:generate` (no site files yet) | Creates `sites/default.env`, then adds the Spaces block below |
+| `./wpd site:add` | Creates `sites/<id>.env` and runs `./wpd env:generate`, which adds the block |
+| Every `./wpd env:generate` | Adds any **missing** `SPACES_*` keys. On sites with Spaces disabled, it also fills keys that are present but empty. Sites with `SPACES_ENABLED=yes` are never rewritten. |
 
 Default block (also in [sites/example.env.sample](../sites/example.env.sample)):
 
@@ -43,13 +43,13 @@ SPACES_PREFIX=<id>
 SPACES_PATH_STYLE=no
 ```
 
-The uppercase words `SPACES_BUCKET` and `SPACES_REGION` inside the two URLs are tokens. `./generate-env.sh` replaces them with your bucket and region values, so you usually only edit `SPACES_BUCKET` and `SPACES_REGION` and leave the URLs alone. For example, with `SPACES_BUCKET=infosoft-playground` and `SPACES_REGION=sgp1`, the public URL becomes `https://infosoft-playground.sgp1.cdn.digitaloceanspaces.com`.
+The uppercase words `SPACES_BUCKET` and `SPACES_REGION` inside the two URLs are tokens. `./wpd env:generate` replaces them with your bucket and region values, so you usually only edit `SPACES_BUCKET` and `SPACES_REGION` and leave the URLs alone. For example, with `SPACES_BUCKET=infosoft-playground` and `SPACES_REGION=sgp1`, the public URL becomes `https://infosoft-playground.sgp1.cdn.digitaloceanspaces.com`.
 
 With `SPACES_ENABLED=no`, uploads stay on the server under `sites/<id>/wp-content/uploads/`, and the placeholder values are ignored. The plugin is still present, so `wp do-spaces status` works for inspection.
 
-If you set `SPACES_ENABLED=yes` while `SPACES_KEY`, `SPACES_SECRET`, or `SPACES_BUCKET` still hold the placeholder text, `./generate-env.sh` stops with an error instead of deploying a broken config.
+If you set `SPACES_ENABLED=yes` while `SPACES_KEY`, `SPACES_SECRET`, or `SPACES_BUCKET` still hold the placeholder text, `./wpd env:generate` stops with an error instead of deploying a broken config.
 
-There is no separate configure command. `./generate-env.sh` is the initializer and backfill step.
+There is no separate configure command. `./wpd env:generate` is the initializer and backfill step.
 
 ---
 
@@ -110,9 +110,9 @@ my-bucket/default/2026/10/photo.jpg
 The plugin ships in the Docker image:
 
 ```bash
-./generate-env.sh
+./wpd env:generate
 docker compose build
-./up.sh
+./wpd up
 ```
 
 ### 4. Bucket permissions
@@ -138,42 +138,42 @@ Use this when the site already has files under `sites/<id>/wp-content/uploads/` 
 ### 1. Prepare
 
 ```bash
-./backup.sh
+./wpd db:backup
 ```
 
 Enable Spaces in `sites/<id>.env`, then rebuild so the migration command is available:
 
 ```bash
-./generate-env.sh
+./wpd env:generate
 docker compose build
-./up.sh
+./wpd up
 ```
 
 ### 2. Check status
 
 ```bash
-./migrate-spaces.sh blog --dry-run
+./wpd spaces:migrate blog --dry-run
 # or inside the container:
-docker compose exec -T -u "${PUID}:${PGID}" blog wp do-spaces status
+./wpd wp blog do-spaces status
 ```
 
 ### 3. Run the migration
 
 ```bash
 # Preview (no uploads, no deletes)
-./migrate-spaces.sh blog --dry-run
+./wpd spaces:migrate blog --dry-run
 
 # Upload everything and remove local copies
-./migrate-spaces.sh blog
+./wpd spaces:migrate blog
 
 # One site, first 100 files
-./migrate-spaces.sh blog --limit=100
+./wpd spaces:migrate blog --limit=100
 
 # Keep local copies until you verify Spaces
-./migrate-spaces.sh blog --keep-local
+./wpd spaces:migrate blog --keep-local
 
 # Every Spaces-enabled site
-./migrate-spaces.sh
+./wpd spaces:migrate
 ```
 
 The command uploads each attachment and its registered thumbnail sizes, sets Spaces metadata, and by default **deletes local files** under `wp-content/uploads/`.
@@ -183,21 +183,19 @@ The command uploads each attachment and its registered thumbnail sizes, sets Spa
 Attachment URLs in templates use Spaces automatically after migration. Old URLs embedded in **post content** may still point at `/wp-content/uploads/...`. Replace them:
 
 ```bash
-set -a && source .env && set +a
-
 OLD='http://blog.example.com/wp-content/uploads'
 NEW='https://my-wp-uploads.nyc3.cdn.digitaloceanspaces.com/blog'
 
-docker compose exec -T -u "${PUID}:${PGID}" blog wp search-replace "$OLD" "$NEW" --all-tables --skip-columns=guid
-docker compose exec -T -u "${PUID}:${PGID}" blog wp cache flush
+./wpd wp blog search-replace "$OLD" "$NEW" --all-tables --skip-columns=guid
+./wpd wp blog cache flush
 ```
 
-Or use `./change-url.sh` if the whole site URL changed.
+Or use `./wpd site:url` if the whole site URL changed.
 
 ### 5. Verify and free disk
 
 ```bash
-docker compose exec -T -u "${PUID}:${PGID}" blog wp do-spaces status
+./wpd wp blog do-spaces status
 du -sh sites/blog/wp-content/uploads/
 ```
 
@@ -215,8 +213,8 @@ SPACES_ENABLED=no
 Then:
 
 ```bash
-./generate-env.sh
-./up.sh
+./wpd env:generate
+./wpd up
 ```
 
 New uploads stay on the server again. Objects already in Spaces are not deleted automatically.
@@ -240,13 +238,13 @@ Configuration is injected via `WORDPRESS_CONFIG_EXTRA` in `docker-compose.sites.
 | Problem | Check |
 |---|---|
 | Upload fails | Spaces key/secret, bucket name, region; PHP container logs |
-| URL is local, not CDN | `SPACES_PUBLIC_URL`; `./generate-env.sh && ./up.sh` |
+| URL is local, not CDN | `SPACES_PUBLIC_URL`; `./wpd env:generate && ./wpd up` |
 | 403 in browser | Bucket or object ACL / CDN not public for reads |
 | Plugin not loading | Rebuild image (`docker compose build`); loader at `mu-plugins/do-spaces-uploads.php` |
 
 ```bash
 docker compose logs -f blog
-docker compose exec -T -u "${PUID}:${PGID}" blog wp plugin list
+./wpd wp blog plugin list
 ```
 
 The plugin appears under **Must Use** in wp-admin when the loader is present.

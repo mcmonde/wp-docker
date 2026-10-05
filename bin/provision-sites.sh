@@ -5,15 +5,15 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 if [ ! -f mysql/init/sites.sql ]; then
-  echo "mysql/init/sites.sql is missing. Run ./generate-env.sh first." >&2
+  echo "mysql/init/sites.sql is missing. Run ./wpd env:generate first." >&2
   exit 1
 fi
 
 if [ ! -f .env ]; then
-  echo ".env is missing. Run ./generate-env.sh first." >&2
+  echo ".env is missing. Run ./wpd env:generate first." >&2
   exit 1
 fi
 
@@ -23,7 +23,7 @@ source .env
 set +a
 
 if ! docker compose ps --status running -q db 2>/dev/null | grep -q .; then
-  echo "Database container is not running. ./up.sh creates site databases after MariaDB is up."
+  echo "Database container is not running. ./wpd up creates site databases after MariaDB is up."
   exit 0
 fi
 

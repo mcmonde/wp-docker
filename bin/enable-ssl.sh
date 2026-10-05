@@ -1,20 +1,20 @@
 #!/bin/bash
 # Issue a Let's Encrypt certificate for one or more sites, then publish port 443.
-# Usage: ./enable-ssl.sh [SITE_ID ...]
+# Usage: ./wpd ssl:enable [SITE_ID ...]
 # With no ids, every site that has a public https WP_HOME is included.
 # Port 80 must be reachable from the public internet.
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 shopt -s nullglob
 
 if [ ! -f .env ]; then
-  echo ".env not found. Run ./generate-env.sh, set EMAIL, and retry." >&2
+  echo ".env not found. Run ./wpd env:generate, set EMAIL, and retry." >&2
   exit 1
 fi
 
-./generate-env.sh
+bin/generate-env.sh
 
 set -a
 # shellcheck disable=SC1091
@@ -40,7 +40,7 @@ else
 fi
 
 if [ "${#site_ids[@]}" -eq 0 ]; then
-  echo "No sites found. Add one with ./add-site.sh." >&2
+  echo "No sites found. Add one with ./wpd site:add." >&2
   exit 1
 fi
 
@@ -108,7 +108,7 @@ for site_id in "${eligible[@]}"; do
     -d "$domain"
 done
 
-./generate-env.sh
+bin/generate-env.sh
 
 echo "Publishing HTTPS..."
 docker compose up -d nginx
@@ -126,9 +126,16 @@ if [ "$reloaded" -ne 1 ]; then
   exit 1
 fi
 
-renew_script="$(pwd)/renew-ssl.sh"
+renew_script="$(pwd)/bin/renew-ssl.sh"
 cron_job="15 4 * * * ${renew_script} >> $(pwd)/backups/ssl-renew.log 2>&1"
 mkdir -p backups
+
+# Entries from before the scripts moved to bin/ point at a file that no longer exists.
+old_renew_script="$(pwd)/renew-ssl.sh"
+if crontab -l 2>/dev/null | grep -F "${old_renew_script} " >/dev/null; then
+  crontab -l 2>/dev/null | { grep -vF "${old_renew_script} " || true; } | crontab -
+  echo "Removed the old renewal cron that pointed at ${old_renew_script}."
+fi
 
 if crontab -l 2>/dev/null | grep -F "$renew_script" >/dev/null; then
   echo "Renewal cron already exists."

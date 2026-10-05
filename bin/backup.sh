@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+SCRIPT_DIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
 BACKUP_DIR="$SCRIPT_DIR/backups"
 RETENTION_DAYS=30
 ENV_FILE="$SCRIPT_DIR/.env"

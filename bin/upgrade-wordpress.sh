@@ -1,21 +1,21 @@
 #!/bin/bash
 # Rebuild the WordPress image and update core on one or more instances.
-# Usage: ./upgrade-wordpress.sh [SITE_ID ...]
+# Usage: ./wpd wp:upgrade [SITE_ID ...]
 # With no ids, every site in sites/*.env is updated.
-# Example: ./upgrade-wordpress.sh blog
+# Example: ./wpd wp:upgrade blog
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 shopt -s nullglob
 
 if [ ! -f .env ]; then
-  echo ".env not found. Run ./generate-env.sh first." >&2
+  echo ".env not found. Run ./wpd env:generate first." >&2
   exit 1
 fi
 
 if [ ! -f docker-compose.sites.yml ]; then
-  echo "docker-compose.sites.yml not found. Run ./generate-env.sh first." >&2
+  echo "docker-compose.sites.yml not found. Run ./wpd env:generate first." >&2
   exit 1
 fi
 
@@ -43,7 +43,7 @@ else
 fi
 
 if [ "${#site_ids[@]}" -eq 0 ]; then
-  echo "No sites found. Add one with ./add-site.sh." >&2
+  echo "No sites found. Add one with ./wpd site:add." >&2
   exit 1
 fi
 
@@ -59,11 +59,11 @@ for site_id in "${site_ids[@]}"; do
 done
 
 echo "Sites to upgrade: ${site_ids[*]}"
-echo "Run ./backup.sh first if you have not backed up recently."
+echo "Run ./wpd db:backup first if you have not backed up recently."
 echo
 
-echo "Rebuilding the WordPress image..."
-docker compose build
+echo "Rebuilding the WordPress image (pulling base image security updates)..."
+docker compose build --pull
 
 echo "Restarting the stack..."
 docker compose up -d --remove-orphans

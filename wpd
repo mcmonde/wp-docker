@@ -1,0 +1,660 @@
+#!/bin/bash
+# wpd: one entry point for this WordPress Docker stack, in the style of `php artisan`.
+# Run ./wpd for the command list, ./wpd help COMMAND for details, ./wpd menu for a numbered menu.
+
+set -euo pipefail
+
+SELF=$(readlink -f "$0")
+cd "$(dirname "$SELF")"
+shopt -s nullglob
+
+WPD="./wpd"
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_BOLD=$'\e[1m' C_DIM=$'\e[2m' C_GREEN=$'\e[32m' C_YELLOW=$'\e[33m' C_RESET=$'\e[0m'
+else
+  C_BOLD="" C_DIM="" C_GREEN="" C_YELLOW="" C_RESET=""
+fi
+
+# name|arguments|description. Lines starting with "#" are group headings.
+COMMANDS=(
+  "#Setup"
+  "install||First-time setup: generate config, then start the stack"
+  "env:generate||Detect CPU/RAM, check capacity, re-tune, and regenerate all config"
+  "#Stack"
+  "up||Start the stack and create site databases"
+  "down||Stop the stack"
+  "restart||Stop and start the stack"
+  "status||Containers, health, and configured sites"
+  "logs|[SERVICE]|Follow logs for every service, or one (site id, db, nginx, redis)"
+  "resources|[SITE_ID] [--live]|How RAM, CPU, PHP workers, OPcache, and memory_limit are split per site"
+  "#Sites"
+  "site:list||List sites with domain, weight, workers, HTTPS, and Spaces"
+  "site:add|SITE_ID DOMAIN [WP_HOME|WEIGHT] [WEIGHT]|Add a site (refused when over capacity)"
+  "site:remove|SITE_ID [--yes]|Remove a site from the stack (keeps its database and files)"
+  "site:url|SITE_ID OLD_URL NEW_URL|Replace a site's URL in its database"
+  "#Database"
+  "db:backup||Dump every site database to backups/"
+  "db:restore||Restore one dump from backups/ (interactive)"
+  "db:provision||Create or update each site's database and user"
+  "#HTTPS"
+  "ssl:enable|[SITE_ID ...]|Issue Let's Encrypt certificates and publish port 443"
+  "ssl:renew||Renew certificates and reload Nginx"
+  "#WordPress"
+  "wp|SITE_ID ARGS...|Run WP-CLI in a site container"
+  "wp:upgrade|[SITE_ID ...]|Rebuild the image, update core, migrate the database, flush cache"
+  "shell|SITE_ID|Open a shell in a site container"
+  "#Media"
+  "spaces:migrate|[SITE_ID ...] [--dry-run] [--keep-local] [--force] [--limit=N] [--offset=N]|Move existing uploads to DigitalOcean Spaces"
+  "#Maintenance"
+  "cron:install||Install the daily 03:00 backup cron"
+  "#Help"
+  "list|[GROUP]|Show this list, or only one group (for example: ./wpd list site)"
+  "help|COMMAND|Show usage and examples for one command"
+  "menu||Pick a command from a numbered menu"
+)
+
+declare -A ALIASES=(
+  [start]=up
+  [stop]=down
+  [ps]=status
+  [configure]=env:generate
+  [generate]=env:generate
+  [res]=resources
+)
+
+cmd_field() {
+  local wanted=$1 field=$2 entry parts
+  for entry in "${COMMANDS[@]}"; do
+    [[ "$entry" == \#* ]] && continue
+    if [ "${entry%%|*}" = "$wanted" ]; then
+      IFS='|' read -r -a parts <<< "$entry"
+      # Arguments may contain "|" (WP_HOME|WEIGHT); description is always the last part.
+      case "$field" in
+        args)
+          local args=${entry#*|}
+          printf '%s' "${args%|*}"
+          ;;
+        desc) printf '%s' "${parts[${#parts[@]}-1]}" ;;
+      esac
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_command() {
+  cmd_field "$1" desc >/dev/null 2>&1
+}
+
+cmd_examples() {
+  case "$1" in
+    install) echo "$WPD install" ;;
+    env:generate)
+      echo "$WPD env:generate"
+      echo "FORCE_SITES=yes $WPD env:generate     # benchmark past the capacity limit"
+      ;;
+    logs)
+      echo "$WPD logs"
+      echo "$WPD logs blog"
+      echo "$WPD logs nginx"
+      ;;
+    site:add)
+      echo "$WPD site:add blog blog.example.com"
+      echo "$WPD site:add shop shop.example.com 3"
+      echo "$WPD site:add shop shop.example.com https://shop.example.com 3"
+      echo "$WPD site:add blog blog.localhost       # local test site"
+      ;;
+    resources)
+      echo "$WPD resources"
+      echo "$WPD resources blog"
+      echo "$WPD resources --live     # add current CPU and memory use from docker stats"
+      ;;
+    site:remove) echo "$WPD site:remove blog" ;;
+    site:url) echo "$WPD site:url blog https://old.example.com https://new.example.com" ;;
+    ssl:enable)
+      echo "$WPD ssl:enable"
+      echo "$WPD ssl:enable blog"
+      ;;
+    wp)
+      echo "$WPD wp blog plugin list"
+      echo "$WPD wp blog user create editor editor@example.com --role=editor"
+      echo "$WPD wp blog cache flush"
+      ;;
+    wp:upgrade)
+      echo "$WPD wp:upgrade"
+      echo "$WPD wp:upgrade blog"
+      ;;
+    shell) echo "$WPD shell blog" ;;
+    spaces:migrate)
+      echo "$WPD spaces:migrate blog --dry-run"
+      echo "$WPD spaces:migrate blog"
+      echo "$WPD spaces:migrate blog --limit=100 --keep-local"
+      ;;
+    list) echo "$WPD list site" ;;
+    help) echo "$WPD help site:add" ;;
+  esac
+}
+
+print_list() {
+  local filter=${1:-} entry name group="" shown_group=""
+  echo "${C_BOLD}WordPress Docker stack${C_RESET}"
+  echo
+  echo "${C_YELLOW}Usage:${C_RESET}"
+  echo "  $WPD COMMAND [ARGUMENTS]"
+  echo "  $WPD help COMMAND"
+  echo
+  echo "${C_YELLOW}Commands:${C_RESET}"
+  for entry in "${COMMANDS[@]}"; do
+    if [[ "$entry" == \#* ]]; then
+      group=${entry#\#}
+      continue
+    fi
+    name=${entry%%|*}
+    if [ -n "$filter" ] && [[ "$name" != "$filter"* ]] && [ "${group,,}" != "${filter,,}" ]; then
+      continue
+    fi
+    if [ "$group" != "$shown_group" ]; then
+      echo " ${C_YELLOW}${group}${C_RESET}"
+      shown_group=$group
+    fi
+    printf '  %s%-16s%s %s\n' "$C_GREEN" "$name" "$C_RESET" "$(cmd_field "$name" desc)"
+  done
+  if [ -n "$filter" ] && [ -z "$shown_group" ]; then
+    echo "  No commands match '${filter}'."
+  fi
+  echo
+  echo "Aliases: start = up, stop = down, ps = status, configure = env:generate, res = resources"
+}
+
+print_help() {
+  local name=${1:-}
+  if [ -z "$name" ]; then
+    print_list
+    return
+  fi
+  name=${ALIASES[$name]:-$name}
+  if ! is_command "$name"; then
+    unknown_command "$name"
+  fi
+  local args desc examples
+  args=$(cmd_field "$name" args)
+  desc=$(cmd_field "$name" desc)
+  echo "${C_YELLOW}Description:${C_RESET}"
+  echo "  $desc"
+  echo
+  echo "${C_YELLOW}Usage:${C_RESET}"
+  echo "  $WPD $name${args:+ $args}"
+  examples=$(cmd_examples "$name")
+  if [ -n "$examples" ]; then
+    echo
+    echo "${C_YELLOW}Examples:${C_RESET}"
+    while IFS= read -r line; do echo "  $line"; done <<< "$examples"
+  fi
+}
+
+unknown_command() {
+  local name=$1 entry candidate matches=()
+  for entry in "${COMMANDS[@]}"; do
+    [[ "$entry" == \#* ]] && continue
+    candidate=${entry%%|*}
+    if [[ "$candidate" == "$name"* ]] || [[ "$candidate" == *"$name"* ]]; then
+      matches+=("$candidate")
+    fi
+  done
+  echo "Unknown command '${name}'." >&2
+  if [ "${#matches[@]}" -gt 0 ]; then
+    echo "Did you mean: ${matches[*]}" >&2
+  fi
+  echo "Run $WPD list to see every command." >&2
+  exit 1
+}
+
+load_env() {
+  if [ ! -f .env ]; then
+    echo ".env not found. Run $WPD install first." >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+}
+
+site_ids() {
+  local file
+  for file in sites/*.env; do
+    basename "$file" .env
+  done
+}
+
+site_value() {
+  local line
+  line=$(grep -E "^$2=" "sites/$1.env" | tail -n 1 || true)
+  printf '%s' "${line#*=}"
+}
+
+require_site() {
+  local id=${1:-}
+  if [ -z "$id" ]; then
+    echo "A SITE_ID is required. Sites: $(site_ids | tr '\n' ' ')" >&2
+    exit 1
+  fi
+  if [ ! -f "sites/${id}.env" ]; then
+    echo "Unknown site '${id}'. Sites: $(site_ids | tr '\n' ' ')" >&2
+    exit 1
+  fi
+}
+
+require_running() {
+  local id=$1
+  if ! docker compose ps --status running -q "$id" 2>/dev/null | grep -q .; then
+    echo "Container '${id}' is not running. Start the stack with $WPD up." >&2
+    exit 1
+  fi
+}
+
+exec_user_args() {
+  EXEC_ARGS=(-u "${PUID}:${PGID}")
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    EXEC_ARGS+=(-T)
+  fi
+}
+
+cmd_site_list() {
+  local ids id domain cert https spaces
+  mapfile -t ids < <(site_ids)
+  if [ "${#ids[@]}" -eq 0 ]; then
+    echo "No sites yet. Run $WPD install or $WPD site:add."
+    return
+  fi
+  printf '%s%-16s %-28s %-34s %-6s %-7s %-5s %-6s%s\n' "$C_BOLD" SITE DOMAIN URL WEIGHT WORKERS HTTPS SPACES "$C_RESET"
+  for id in "${ids[@]}"; do
+    domain=$(site_value "$id" DOMAIN)
+    cert="certs/live/${domain}/fullchain.pem"
+    https=no
+    [ -f "$cert" ] && https=yes
+    spaces=$(site_value "$id" SPACES_ENABLED)
+    printf '%-16s %-28s %-34s %-6s %-7s %-5s %-6s\n' \
+      "$id" "$domain" "$(site_value "$id" WP_HOME)" \
+      "$(site_value "$id" ALLOCATION_WEIGHT)" "$(site_value "$id" PHP_FPM_PM_MAX_CHILDREN)" \
+      "$https" "${spaces:-no}"
+  done
+}
+
+cmd_status() {
+  load_env
+  echo "${C_YELLOW}Containers:${C_RESET}"
+  docker compose ps --format 'table {{.Service}}\t{{.Status}}\t{{.Ports}}' || true
+  echo
+  echo "${C_YELLOW}Sites:${C_RESET}"
+  cmd_site_list
+  if [ -n "${HOST_CPU_CORES:-}" ]; then
+    echo
+    echo "${C_YELLOW}Resources:${C_RESET}"
+    echo "  Host ${HOST_CPU_CORES} vCPU / ${HOST_RAM_MB} MB; stack sized for ${CPU_CORES} vCPU / ${TOTAL_RAM_MB} MB"
+    echo "  ALLOCATE_RESOURCES=${ALLOCATE_RESOURCES:-?}, AUTO_TUNE=${AUTO_TUNE:-?}"
+  fi
+}
+
+to_mb() {
+  local raw=${1:-0} n
+  n=${raw//[^0-9]/}
+  n=${n:-0}
+  case "${raw,,}" in
+    *g|*gb) n=$((n * 1024)) ;;
+  esac
+  printf '%s' "$n"
+}
+
+pct() {
+  if [ "${2:-0}" -gt 0 ]; then printf '%d%%' $(($1 * 100 / $2)); else printf -- '-'; fi
+}
+
+cpus_from_milli() {
+  printf '%d.%02d' $(($1 / 1000)) $(($1 % 1000 / 10))
+}
+
+cmd_resources() {
+  local filter="" live=no arg
+  for arg in "$@"; do
+    case "$arg" in
+      --live) live=yes ;;
+      -*)
+        echo "Unknown option '${arg}'. Usage: $WPD resources [SITE_ID] [--live]" >&2
+        exit 1
+        ;;
+      *) filter=$arg ;;
+    esac
+  done
+  load_env
+  if [ -n "$filter" ]; then require_site "$filter"; fi
+
+  local ids id
+  mapfile -t ids < <(site_ids)
+  if [ "${#ids[@]}" -eq 0 ]; then
+    echo "No sites yet. Run $WPD install or $WPD site:add."
+    return
+  fi
+
+  local total_ram=${TOTAL_RAM_MB:-0} db_mb redis_mb nginx_mb wp_mb os_mb=384
+  db_mb=$(to_mb "${DB_MEM_LIMIT:-0}")
+  redis_mb=$(to_mb "${REDIS_MEM_LIMIT:-0}")
+  nginx_mb=$(to_mb "${NGINX_MEM_LIMIT:-0}")
+  wp_mb=$(to_mb "${WP_MEM_LIMIT:-0}")
+  local opcache_mb php_limit_mb avg_mb pm=${PHP_FPM_PM:-ondemand}
+  opcache_mb=$(to_mb "${OPCACHE_MEMORY_MB:-128}")
+  php_limit_mb=$(to_mb "${PHP_MEMORY_LIMIT:-256M}")
+  avg_mb=${PHP_WORKER_AVG_MB:-80}
+
+  local total_weight=0 weight
+  for id in "${ids[@]}"; do
+    weight=$(site_value "$id" ALLOCATION_WEIGHT)
+    total_weight=$((total_weight + ${weight:-1}))
+  done
+
+  echo "${C_YELLOW}Host and budget${C_RESET}"
+  printf '  %-16s %s vCPU, %s MB RAM\n' "Host:" "${HOST_CPU_CORES:-?}" "${HOST_RAM_MB:-?}"
+  if [ -n "${STACK_CPU_CORES:-}" ] || [ -n "${STACK_RAM_MB:-}" ]; then
+    local cores_note=""
+    if [ -n "${STACK_CPU_CORES:-}" ]; then
+      cores_note=" (cores 0-$((STACK_CPU_CORES - 1)))"
+      [ "$STACK_CPU_CORES" -eq 1 ] && cores_note=" (core 0)"
+    fi
+    printf '  %-16s %s vCPU%s, %s MB RAM%s (stack budget)\n' "Sized for:" "$CPU_CORES" "$cores_note" "$total_ram" "${STACK_RAM_MB:+, no swap}"
+  else
+    printf '  %-16s %s vCPU, %s MB RAM (whole host)\n' "Sized for:" "${CPU_CORES:-?}" "$total_ram"
+  fi
+  printf '  %-16s total weight %s, in use %s\n' "Capacity:" "${SITE_CAPACITY:-?}" "$total_weight"
+  printf '  %-16s ALLOCATE_RESOURCES=%s, AUTO_TUNE=%s\n' "Settings:" "${ALLOCATE_RESOURCES:-?}" "${AUTO_TUNE:-?}"
+
+  echo
+  echo "${C_YELLOW}Memory plan${C_RESET} (of ${total_ram} MB)"
+  printf '  %-12s %8s %5s  %s\n' "OS reserve" "${os_mb} MB" "$(pct "$os_mb" "$total_ram")" "kept free for the OS and Docker"
+  printf '  %-12s %8s %5s  %s\n' "MariaDB" "${db_mb} MB" "$(pct "$db_mb" "$total_ram")" "buffer pool ${INNODB_BUFFER_POOL_SIZE:-?}, log ${INNODB_LOG_FILE_SIZE:-?}, ${MAX_CONNECTIONS:-?} connections"
+  printf '  %-12s %8s %5s  %s\n' "Redis" "${redis_mb} MB" "$(pct "$redis_mb" "$total_ram")" "maxmemory ${REDIS_MAXMEMORY:-?} (allkeys-lru)"
+  printf '  %-12s %8s %5s\n' "Nginx" "${nginx_mb} MB" "$(pct "$nginx_mb" "$total_ram")"
+  printf '  %-12s %8s %5s  %s\n' "WordPress" "${wp_mb} MB" "$(pct "$wp_mb" "$total_ram")" "CPU budget $(cpus_from_milli "${WP_CPU_MILLICORES:-0}") cores, split by weight below"
+  printf '  %-12s %8s\n' "Total" "$((os_mb + db_mb + redis_mb + nginx_mb + wp_mb)) MB"
+
+  echo
+  echo "${C_YELLOW}PHP (same for every site)${C_RESET}"
+  printf '  %-18s %s per request (a ceiling, not reserved)\n' "memory_limit:" "${PHP_MEMORY_LIMIT:-256M}"
+  printf '  %-18s %s MB per site, shared by its workers\n' "OPcache:" "$opcache_mb"
+  printf '  %-18s %s MB (PHP_WORKER_AVG_MB, used to count workers)\n' "Average worker:" "$avg_mb"
+  printf '  %-18s %s per vCPU, shared by weight\n' "CPU workers:" "${WORKERS_PER_CPU:-4}"
+  printf '  %-18s %s\n' "Process manager:" "$pm"
+  printf '  %-18s %s upload, %ss timeout\n' "Requests:" "${UPLOAD_MAX:-?}" "${FASTCGI_TIMEOUT:-?}"
+
+  echo
+  echo "${C_YELLOW}Per site${C_RESET}"
+  printf '%s  %-14s %-9s %-10s %-9s %-10s %-9s %-8s %-6s %-9s %-10s%s\n' "$C_BOLD" \
+    SITE WEIGHT "RAM SHARE" "CPU SHARE" "RAM CAP" "CPU CAP" WORKERS IDLE "EST PEAK" "WORST CASE" "$C_RESET"
+  local share cpu_share mem_cap cpu_cap children idle peak worst missing=no
+  local sum_children=0 sum_peak=0 sum_worst=0 sum_share=0
+  for id in "${ids[@]}"; do
+    weight=$(site_value "$id" ALLOCATION_WEIGHT)
+    weight=${weight:-1}
+    share=$(site_value "$id" SITE_MEM_SHARE_MB)
+    cpu_share=$(site_value "$id" SITE_CPU_SHARE_MILLI)
+    if [ -z "$share" ]; then
+      missing=yes
+      share=$((wp_mb * weight / total_weight))
+      cpu_share=$((${WP_CPU_MILLICORES:-0} * weight / total_weight))
+    fi
+    mem_cap=$(site_value "$id" SITE_MEM_LIMIT)
+    cpu_cap=$(site_value "$id" SITE_CPU_LIMIT)
+    children=$(site_value "$id" PHP_FPM_PM_MAX_CHILDREN)
+    children=${children:-0}
+    if [ "$pm" = "dynamic" ]; then
+      idle=$(site_value "$id" PHP_FPM_PM_START_SERVERS)
+    else
+      idle=0
+    fi
+    peak=$((opcache_mb + 32 + children * avg_mb))
+    worst=$((opcache_mb + 32 + children * php_limit_mb))
+    sum_children=$((sum_children + children))
+    sum_peak=$((sum_peak + peak))
+    sum_worst=$((sum_worst + worst))
+    sum_share=$((sum_share + share))
+    if [ -n "$filter" ] && [ "$id" != "$filter" ]; then continue; fi
+    printf '  %-14s %-9s %-10s %-9s %-10s %-9s %-8s %-6s %-9s %-10s\n' \
+      "$id" "${weight} ($(pct "$weight" "$total_weight"))" "${share} MB" "$(cpus_from_milli "${cpu_share:-0}")" \
+      "${mem_cap:-?}" "${cpu_cap:-?}" "$children" "$idle" "${peak} MB" "${worst} MB"
+  done
+  if [ -z "$filter" ] && [ "${#ids[@]}" -gt 1 ]; then
+    printf '  %-14s %-9s %-10s %-9s %-10s %-9s %-8s %-6s %-9s %-10s\n' \
+      "TOTAL" "$total_weight" "${sum_share} MB" "$(cpus_from_milli "${WP_CPU_MILLICORES:-0}")" "" "" "$sum_children" "" "${sum_peak} MB" "${sum_worst} MB"
+  fi
+
+  echo
+  echo "  RAM/CPU SHARE  weighted slice of the WordPress budget; workers are sized to fit it"
+  echo "  RAM/CPU CAP    Docker limit actually enforced (unlimited = none)"
+  echo "  WORKERS        pm.max_children; IDLE is how many run with no traffic (ondemand = 0)"
+  echo "  EST PEAK       OPcache + 32 MB FPM master + workers x ${avg_mb} MB, when every worker is busy"
+  echo "  WORST CASE     every worker at memory_limit (${php_limit_mb} MB) at once; rare, but a capped site would hit its cap"
+  echo
+  if [ "$sum_peak" -gt "$wp_mb" ] && [ "$wp_mb" -gt 0 ]; then
+    echo "  ${C_YELLOW}Estimated peak (${sum_peak} MB) is above the WordPress budget (${wp_mb} MB), usually because sites sit at the 2-worker minimum. Remove a site, lower a weight, or add RAM.${C_RESET}"
+  else
+    echo "  Estimated peak fits the WordPress budget (${sum_peak} of ${wp_mb} MB)."
+  fi
+  if [ "${MAX_CONNECTIONS:-0}" -lt "$sum_children" ]; then
+    echo "  ${C_YELLOW}MAX_CONNECTIONS (${MAX_CONNECTIONS:-0}) is below the ${sum_children} PHP workers.${C_RESET}"
+  else
+    echo "  MariaDB allows ${MAX_CONNECTIONS:-?} connections for ${sum_children} PHP workers."
+  fi
+  if [ "$missing" = "yes" ]; then
+    echo "  ${C_YELLOW}Some shares are estimated; run $WPD env:generate to record exact values.${C_RESET}"
+  fi
+
+  if [ "$live" = "yes" ]; then
+    echo
+    echo "${C_YELLOW}Live usage${C_RESET} (docker stats)"
+    local names=("${PROJECT_NAME}_db" "${PROJECT_NAME}_redis" "${PROJECT_NAME}_nginx")
+    for id in "${ids[@]}"; do
+      if [ -z "$filter" ] || [ "$id" = "$filter" ]; then names+=("${PROJECT_NAME}_${id}"); fi
+    done
+    local running=()
+    for arg in "${names[@]}"; do
+      if docker ps --format '{{.Names}}' | grep -qx "$arg"; then running+=("$arg"); fi
+    done
+    if [ "${#running[@]}" -eq 0 ]; then
+      echo "  No stack containers are running. Start them with $WPD up."
+    else
+      docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}' "${running[@]}" | sed 's/^/  /'
+    fi
+  fi
+}
+
+cmd_install() {
+  local answer
+  if [ -f .env ]; then
+    echo ".env already exists, so this is not a first install. Regenerating config instead."
+  fi
+  bin/generate-env.sh
+  echo
+  echo "Before going public, check EMAIL in .env and DOMAIN / WP_HOME in sites/*.env."
+  if [ -t 0 ]; then
+    read -r -p "Start the stack now? [Y/n] " answer
+    case "${answer,,}" in
+      n|no)
+        echo "Start it later with $WPD up."
+        return
+        ;;
+    esac
+    bin/up.sh
+    echo
+    echo "Open each site's WP_HOME in a browser to finish the WordPress install:"
+    cmd_site_list
+  else
+    echo "Start the stack with $WPD up."
+  fi
+}
+
+cmd_site_remove() {
+  local id=${1:-} flag=${2:-} count answer db_name dest
+  require_site "$id"
+  count=$(site_ids | wc -l)
+  if [ "$count" -le 1 ]; then
+    echo "'${id}' is the only site. env:generate recreates a default site when none exist, so the last site cannot be removed." >&2
+    exit 1
+  fi
+  db_name=$(site_value "$id" DB_NAME)
+  if [ "$flag" != "--yes" ]; then
+    if [ ! -t 0 ]; then
+      echo "Pass --yes to remove '${id}' without a prompt." >&2
+      exit 1
+    fi
+    echo "This removes '${id}' from Compose, Nginx, and PHP-FPM."
+    echo "Its database (${db_name}) and sites/${id}/wp-content stay in place."
+    read -r -p "Type the site id to confirm: " answer
+    if [ "$answer" != "$id" ]; then
+      echo "Cancelled."
+      exit 0
+    fi
+  fi
+
+  if [ -f .env ]; then load_env; fi
+  if docker compose ps -q "$id" 2>/dev/null | grep -q .; then
+    docker compose rm -sf "$id"
+  fi
+
+  mkdir -p backups/removed-sites
+  dest="backups/removed-sites/${id}-$(date +%Y-%m-%d_%H-%M-%S).env"
+  mv "sites/${id}.env" "$dest"
+  chmod 600 "$dest"
+
+  bin/generate-env.sh
+  if docker compose ps --status running -q nginx 2>/dev/null | grep -q .; then
+    docker compose up -d --remove-orphans
+  fi
+
+  echo
+  echo "Removed '${id}'. Its settings and database password were saved to ${dest}."
+  echo "Still present until you delete them:"
+  printf '  %-12s %s\n' "database:" "docker compose exec db mariadb -u root -p -e 'DROP DATABASE \`${db_name}\`'"
+  printf '  %-12s %s\n' "files:" "sites/${id}/"
+  printf '  %-12s %s\n' "core volume:" "docker volume ls | grep ${id}_html"
+}
+
+cmd_wp() {
+  local id=${1:-}
+  require_site "$id"
+  shift
+  load_env
+  require_running "$id"
+  exec_user_args
+  local extra=()
+  if [ "${PUID}" -eq 0 ]; then extra+=(--allow-root); fi
+  exec docker compose exec "${EXEC_ARGS[@]}" "$id" wp "${extra[@]}" "$@"
+}
+
+cmd_shell() {
+  local id=${1:-}
+  require_site "$id"
+  load_env
+  require_running "$id"
+  exec_user_args
+  exec docker compose exec "${EXEC_ARGS[@]}" "$id" sh
+}
+
+cmd_logs() {
+  load_env
+  if [ -n "${1:-}" ]; then
+    exec docker compose logs -f --tail=100 "$1"
+  fi
+  exec docker compose logs -f --tail=100
+}
+
+run_menu() {
+  local entries=() entry name args choice line i
+  if [ ! -t 0 ]; then
+    echo "The menu needs an interactive terminal. Use $WPD list instead." >&2
+    exit 1
+  fi
+  for entry in "${COMMANDS[@]}"; do
+    [[ "$entry" == \#* ]] && continue
+    name=${entry%%|*}
+    case "$name" in list|help|menu) continue ;; esac
+    entries+=("$name")
+  done
+  while true; do
+    echo
+    echo "${C_BOLD}WordPress Docker stack${C_RESET}"
+    i=1
+    for name in "${entries[@]}"; do
+      printf '  %s%2d)%s %-16s %s%s%s\n' "$C_GREEN" "$i" "$C_RESET" "$name" "$C_DIM" "$(cmd_field "$name" desc)" "$C_RESET"
+      i=$((i + 1))
+    done
+    echo "   q) Quit"
+    read -r -p "Choose a number: " choice
+    case "$choice" in
+      q|Q|"") return 0 ;;
+    esac
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#entries[@]}" ]; then
+      echo "Pick a number from 1 to ${#entries[@]}."
+      continue
+    fi
+    name=${entries[$((choice - 1))]}
+    args=$(cmd_field "$name" args)
+    line=""
+    if [ -n "$args" ]; then
+      echo
+      echo "Usage: $WPD $name $args"
+      if [[ "$args" == *SITE_ID* ]] || [ "$name" = "logs" ]; then
+        echo "Sites: $(site_ids | tr '\n' ' ')"
+      fi
+      read -r -p "Arguments (Enter for none): " line
+    fi
+    local argv=()
+    read -r -a argv <<< "$line"
+    echo
+    # A failing command returns to the menu instead of closing it.
+    "$SELF" "$name" "${argv[@]}" || echo "${C_YELLOW}'${name}' exited with an error.${C_RESET}"
+    echo
+    read -r -p "Press Enter to return to the menu..." _
+  done
+}
+
+command=${1:-list}
+if [ "$#" -gt 0 ]; then shift; fi
+command=${ALIASES[$command]:-$command}
+
+case "${1:-}" in
+  -h|--help)
+    if [ "$command" != "help" ] && is_command "$command"; then
+      print_help "$command"
+      exit 0
+    fi
+    ;;
+esac
+
+case "$command" in
+  list|-h|--help) print_list "${1:-}" ;;
+  help) print_help "${1:-}" ;;
+  menu) run_menu ;;
+  install) cmd_install ;;
+  env:generate) exec bin/generate-env.sh "$@" ;;
+  up) exec bin/up.sh "$@" ;;
+  down) exec bin/down.sh "$@" ;;
+  restart) bin/down.sh && exec bin/up.sh ;;
+  status) cmd_status ;;
+  logs) cmd_logs "$@" ;;
+  resources) cmd_resources "$@" ;;
+  site:list) cmd_site_list ;;
+  site:add) exec bin/add-site.sh "$@" ;;
+  site:remove) cmd_site_remove "$@" ;;
+  site:url) exec bin/change-url.sh "$@" ;;
+  db:backup) exec bin/backup.sh "$@" ;;
+  db:restore) exec bin/restore.sh "$@" ;;
+  db:provision) exec bin/provision-sites.sh "$@" ;;
+  ssl:enable) exec bin/enable-ssl.sh "$@" ;;
+  ssl:renew) exec bin/renew-ssl.sh "$@" ;;
+  wp) cmd_wp "$@" ;;
+  wp:upgrade) exec bin/upgrade-wordpress.sh "$@" ;;
+  shell) cmd_shell "$@" ;;
+  spaces:migrate) exec bin/migrate-spaces.sh "$@" ;;
+  cron:install) exec bin/cron-setup.sh "$@" ;;
+  *) unknown_command "$command" ;;
+esac
