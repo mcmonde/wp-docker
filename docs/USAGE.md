@@ -509,6 +509,7 @@ An unknown or partial command suggests matches (`./wpd site` lists the `site:*` 
 | `wp SITE_ID ARGS...` | built in | WP-CLI in that instance's container, as `PUID:PGID` |
 | `wp:upgrade [SITE_ID ...]` | `bin/upgrade-wordpress.sh` | Rebuild image with `--pull` (base image security updates); `wp core update`, `update-db`, and `cache flush` per instance |
 | `shell SITE_ID` | built in | `sh` inside that instance's container |
+| `spaces:test [SITE_ID] [--wiring-only]` | `bin/test-spaces.sh` | Smoke-test DO Spaces plugin wiring and (when enabled) live put/delete; see [SPACES.md](SPACES.md) |
 | `spaces:migrate [SITE_ID ...] [options]` | `bin/migrate-spaces.sh` | Move existing uploads to DigitalOcean Spaces (`--dry-run`, `--limit=N`, `--keep-local`); see [SPACES.md](SPACES.md) |
 | `cron:install` | `bin/cron-setup.sh` | Add the daily 03:00 backup cron if missing (called by `env:generate`) |
 
@@ -667,6 +668,7 @@ Verify with:
 | Server resized (CPU or RAM) | `./wpd env:generate` → `./wpd up` (re-detects the host and re-tunes) |
 | Limit or unlimit the stack's CPU/RAM | edit `STACK_CPU_CORES` / `STACK_RAM_MB` in `.env` → `./wpd env:generate` → `./wpd up` |
 | Enable DigitalOcean Spaces | edit `SPACES_*` in `sites/<id>.env` → `./wpd env:generate` → `docker compose build` → `./wpd up` ([SPACES.md](SPACES.md)) |
+| Smoke-test Spaces wiring / live put-delete | `./wpd spaces:test --wiring-only` → `./wpd spaces:test <id>` |
 | Move existing uploads to Spaces | `./wpd spaces:migrate <id> --dry-run` → `./wpd spaces:migrate <id>` |
 | HTTPS | set `WP_HOME` to https → `./wpd ssl:enable` |
 | WordPress core update | `./wpd db:backup` → `./wpd wp:upgrade` |
