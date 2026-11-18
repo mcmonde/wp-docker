@@ -45,6 +45,7 @@ COMMANDS=(
   "wp:upgrade|[SITE_ID ...]|Rebuild the image, update core, migrate the database, flush cache"
   "shell|SITE_ID|Open a shell in a site container"
   "#Media"
+  "spaces:test|[SITE_ID] [--wiring-only]|Smoke-test DO Spaces wiring and live put/delete"
   "spaces:migrate|[SITE_ID ...] [--dry-run] [--keep-local] [--force] [--limit=N] [--offset=N]|Move existing uploads to DigitalOcean Spaces"
   "#Maintenance"
   "cron:install||Install the daily 03:00 backup cron"
@@ -126,6 +127,11 @@ cmd_examples() {
       echo "$WPD wp:upgrade blog"
       ;;
     shell) echo "$WPD shell blog" ;;
+    spaces:test)
+      echo "$WPD spaces:test"
+      echo "$WPD spaces:test blog"
+      echo "$WPD spaces:test --wiring-only"
+      ;;
     spaces:migrate)
       echo "$WPD spaces:migrate blog --dry-run"
       echo "$WPD spaces:migrate blog"
@@ -687,6 +693,7 @@ case "$command" in
   wp) cmd_wp "$@" ;;
   wp:upgrade) exec bin/upgrade-wordpress.sh "$@" ;;
   shell) cmd_shell "$@" ;;
+  spaces:test) exec bin/test-spaces.sh "$@" ;;
   spaces:migrate) exec bin/migrate-spaces.sh "$@" ;;
   cron:install) exec bin/cron-setup.sh "$@" ;;
   *) unknown_command "$command" ;;

@@ -144,11 +144,19 @@ For large libraries, `./wpd spaces:migrate` is faster than the admin page.
 
 ## Verify
 
+From the repo root:
+
 ```bash
+# Offline: plugin files, Dockerfile/entrypoint, env keys, SigV4 shape
+./wpd spaces:test --wiring-only
+
+# Live: non-destructive put+delete for a Spaces-enabled site (needs credentials + running stack)
+./wpd spaces:test blog
+# same check inside the container:
 ./wpd wp blog do-spaces test
 ```
 
-`do-spaces test` runs the same upload-and-delete check as the admin page and exits non-zero on failure. Then upload an image in WordPress admin and check:
+`spaces:test` checks that the must-use plugin is wired into the image and env generator, then (without `--wiring-only`) runs `wp do-spaces test`. That command uses the same upload-and-delete check as the admin page and exits non-zero on failure. Then upload an image in WordPress admin and check:
 
 - The attachment URL uses your `SPACES_PUBLIC_URL` (or bucket URL).
 - The file is **not** kept on the server under `sites/<id>/wp-content/uploads/` (except briefly during upload).

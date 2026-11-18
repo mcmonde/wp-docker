@@ -145,6 +145,8 @@ docker compose build
 In wp-admin, **Media → DO Spaces** shows the settings (without the secret), tests the connection with a real upload and delete, counts media still on the server, and, when the test passes, uploads it to Spaces in small batches with a progress bar. Administrators also get a notice on other admin screens while server media is waiting. From the command line:
 
 ```bash
+./wpd spaces:test --wiring-only
+./wpd spaces:test blog
 ./wpd wp blog do-spaces test
 ./wpd spaces:migrate blog --dry-run
 ./wpd spaces:migrate blog
@@ -300,6 +302,7 @@ Redis requires a password (`REDIS_PASSWORD` in `.env`). Object caching uses the 
 | `wp SITE ARGS...` | Run WP-CLI in an instance |
 | `wp:upgrade` | Rebuild the image and update WordPress core |
 | `shell SITE` | Open a shell in an instance's container |
+| `spaces:test` | Smoke-test DO Spaces wiring and live put/delete |
 | `spaces:migrate` | Move existing uploads to DigitalOcean Spaces |
 | `cron:install` | Install the daily 03:00 backup cron (run by `env:generate`) |
 | `list` / `help` / `menu` | Command list, per-command help, numbered menu |
