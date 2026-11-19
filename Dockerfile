@@ -1,7 +1,7 @@
 # WordPress PHP-FPM plus WP-CLI and the Redis Object Cache plugin.
 # The plugin is installed outside /var/www/html/wp-content because Compose
 # bind-mounts that directory from the host.
-FROM wordpress:7.1.2-php8.5-fpm-alpine
+FROM wordpress:7.1.5-php8.5-fpm-alpine
 
 # Bump a version together with its checksum. WP-CLI publishes its SHA-512 next to each
 # release; WordPress.org publishes none for plugin zips, so that SHA-256 was taken from
